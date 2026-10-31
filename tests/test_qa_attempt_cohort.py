@@ -103,6 +103,16 @@ class CohortTests(unittest.TestCase):
         with self.assertRaisesRegex(module.AuditError, "attempt_count_inconsistent"):
             module.summarize_job(bad)
 
+    def test_prior_terminal_outcomes_must_not_be_retried(self):
+        control = job(status="done")
+        self.assertEqual(module.summarize_job(control)["attempts"], 2)
+        for terminal in ("done", "failed", "superseded"):
+            with self.subTest(prior_outcome=terminal):
+                invalid = job(status="done")
+                invalid["attempt_history"][0]["outcome"] = terminal
+                with self.assertRaisesRegex(module.AuditError, "prior_attempt_not_retryable"):
+                    module.summarize_job(invalid)
+
     def test_duplicate_identity_excludes_every_conflicting_record(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)

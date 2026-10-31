@@ -92,6 +92,8 @@ def summarize_job(job: object) -> dict:
             "done", "failed", "superseded", "timed_out", "rejected", "retry"
         ):
             raise AuditError("attempt_outcome_nonterminal")
+        if index < len(attempts) and outcome not in ("rejected", "retry", "timed_out"):
+            raise AuditError("prior_attempt_not_retryable")
         if index == len(attempts):
             expected = {
                 "done": frozenset(("done",)),
