@@ -1,0 +1,31 @@
+name: E2E latency evidence (CPU only)
+on:
+  pull_request:
+    paths:
+      - 'scripts/render_firstshot_latency_probe.py'
+      - 'scripts/tests/test_render_firstshot_latency_probe.py'
+      - 'docs/E2E-LATENCY-EVIDENCE-2026-10-31.md'
+      - '.github/workflows/e2e-latency-evidence.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/render_firstshot_latency_probe.py'
+      - 'scripts/tests/test_render_firstshot_latency_probe.py'
+      - '.github/workflows/e2e-latency-evidence.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  latency-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify source-only stage evidence and G2 hash-bypass regression
+        run: |
+          python -m py_compile scripts/render_firstshot_latency_probe.py scripts/tests/test_render_firstshot_latency_probe.py
+          python -m unittest discover -q -s scripts/tests -p 'test_render_firstshot_latency_probe.py'
