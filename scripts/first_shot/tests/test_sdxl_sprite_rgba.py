@@ -114,6 +114,27 @@ class RgbaOutputTests(unittest.TestCase):
             sprite.derive_rgba_candidate(
                 self.root, "../escape", self.source, self.source_sha)
 
+    def test_runs_ancestor_symlink_rejected_before_private_rgba_write(self):
+        outside = Path(self.tmp.name) / "other-sink"
+        (outside / self.id).mkdir(parents=True)
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "runs").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "missing_private_sprite_run"):
+            sprite.derive_rgba_candidate(self.root, self.id, self.source, self.source_sha)
+        self.assertFalse((outside / self.id / "sprite-rgba-candidate.png").exists())
+
+    def test_comfy_original_ancestor_symlink_rejected_before_matte(self):
+        outside = Path(self.tmp.name) / "other-original"
+        outside.mkdir()
+        source = outside / "original.png"
+        source_sha = fixture(source)
+        (self.home / "original-alias").symlink_to(outside, target_is_directory=True)
+        (self.root / "runs" / self.id).mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, "missing_or_unsafe_private_source"):
+            sprite.derive_rgba_candidate(
+                self.root, self.id, self.home / "original-alias" / "original.png", source_sha)
+        self.assertFalse((self.root / "runs" / self.id / "sprite-rgba-candidate.png").exists())
+
     def _simulate_tick(self, *, background=(246, 246, 246), undecodable=False):
         plan = {"id": self.id, "factor": "sdxl_sprite_body_source", "case": "SPRITE-CANONICAL"}
         pending = self.root / "pending"
