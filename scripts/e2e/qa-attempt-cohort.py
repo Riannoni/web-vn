@@ -65,7 +65,9 @@ def checked_timestamp(value: object, label: str) -> dt.datetime:
     return parsed
 
 
-def summarize_job(job: object) -> dict:
+def summarize_job(job: object, *, as_of: dt.datetime | None = None) -> dict:
+    if as_of is not None and as_of.utcoffset() is None:
+        raise AuditError("as_of_timezone_required")
     if not isinstance(job, dict):
         raise AuditError("job_not_object")
     job_id = job.get("id")
@@ -84,6 +86,8 @@ def summarize_job(job: object) -> dict:
             raise AuditError("attempt_number_not_contiguous")
         claimed = checked_timestamp(attempt.get("claimed_at"), "attempt_claimed_at")
         finished = checked_timestamp(attempt.get("finished_at"), "attempt_finished_at")
+        if as_of is not None and (claimed > as_of or finished > as_of):
+            raise AuditError("attempt_after_as_of")
         if finished < claimed or (prior_finished is not None and claimed < prior_finished):
             raise AuditError("attempt_timestamp_order_invalid")
         prior_finished = finished
@@ -166,7 +170,7 @@ def audit_directory(directory: Path, as_of: dt.datetime, lookback_hours: float) 
             job = json.loads(content)
             identifier = job.get("id") if isinstance(job, dict) else None
             identifier = identifier if isinstance(identifier, str) and identifier else None
-            row = summarize_job(job)
+            row = summarize_job(job, as_of=as_of)
             candidates.append((identifier, row, None))
         except AuditError as exc:
             candidates.append((identifier if "identifier" in locals() else None, None, str(exc)))
@@ -197,7 +201,8 @@ def audit_directory(directory: Path, as_of: dt.datetime, lookback_hours: float) 
         "source": "private_editable_job_files_UNAUTHENTICATED",
         "as_of_utc": as_of.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "lookback_hours": lookback_hours,
-        "sample_selection": "file_mtime_window_including_failed_and_superseded",
+        "sample_selection": "file_mtime_window_and_attempt_as_of_fence_including_failed_and_superseded",
+        "attempt_time_cutoff": "claimed_at_and_finished_at_must_be_lte_as_of",
         "raw_file_count": len(hashes), "valid_job_count": len(rows),
         "excluded_job_count": len(hashes)-len(rows), "excluded_by_reason": dict(sorted(reasons.items())),
         "raw_file_sha256_manifest": hashlib.sha256("\n".join(sorted(hashes)).encode()).hexdigest(),
@@ -213,6 +218,7 @@ def audit_directory(directory: Path, as_of: dt.datetime, lookback_hours: float) 
         "g2": "NOT_ASSESSED", "human_labels": 0,
         "limitations": [
             "Raw job JSON and file mtime can be edited; manifest SHA only fixes this audit's input bytes.",
+            "File mtime selects cohort files, while each attempt claim/finish is separately bounded by the historical as_of cutoff.",
             "Each earlier QA attempt counts in job-level QA, but per-attempt VLM histories are absent.",
             "Latest QA and latest result's VLM are descriptive pairing candidates, not signed attempt receipts.",
             "The QA minus VLM residual cannot be assigned to lock, geometry, network or loading.",
