@@ -14,9 +14,29 @@ _EXPLICIT_SOLO=re.compile(
     r"(?:adult\s+)?(?:person|people|man|woman|adult|figure|character)\b",
     re.I)
 
+def _negated_count_mention(text, start):
+    """Ignore a local negation immediately preceding a count phrase.
+
+    This is only a caption heuristic, not independent evidence of scene count.
+    Other positive mentions in the same caption still count.
+    """
+    prefix = text[max(0, start - 32):start]
+    return bool(re.search(r"\b(?:no|not|without|never)\s+(?:even\s+)?(?:a\s+)?$", prefix, re.I))
+
+
+def _asserts_extra_person(caption):
+    text = str(caption or "")
+    return any(not _negated_count_mention(text, match.start())
+               for match in _EXTRA_PERSON.finditer(text))
+
+
 def caption_asserts_single_person(caption):
-    """Only positive SOLO assertions count; 'a man with a woman' is not solo."""
-    return bool(_EXPLICIT_SOLO.search(str(caption or "")))
+    """Only unnegated SOLO claims without explicit extra people count."""
+    text = str(caption or "")
+    if _asserts_extra_person(text):
+        return False
+    return any(not _negated_count_mention(text, match.start())
+               for match in _EXPLICIT_SOLO.finditer(text))
 
 def insufficient_scene_caption(caption):
     """A bare count such as 'Two.' is not evidence of an accurate scene."""
@@ -54,7 +74,7 @@ def scene_caption_conflicts(characters,caption):
     reasons=[]
     if insufficient_scene_caption(desc):
         reasons.append("VLM did not describe CG contents well enough to verify the scene")
-    if len(people)==1 and _EXTRA_PERSON.search(desc):
+    if len(people)==1 and _asserts_extra_person(desc):
         reasons.append("Neural CG contains an additional principal figure according to VLM")
     if len(people)==1 and wants_unclothed(people[0].get("outfit","")):
         # A definite visible clothing contradiction is evidence; silence,

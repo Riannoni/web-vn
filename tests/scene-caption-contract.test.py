@@ -33,6 +33,30 @@ class CaptionCountTest(unittest.TestCase):
   self.assertTrue(caption_asserts_single_person("There is only one person in this scene."))
   self.assertTrue(caption_asserts_single_person("A single woman is standing in the forest."))
   self.assertTrue(caption_asserts_single_person("Exactly one adult figure is visible."))
+ def test_negated_only_one_is_not_positive_solo_evidence(self):
+  self.assertFalse(caption_asserts_single_person(
+      "Not only one person appears; two people are clearly visible."))
+ def test_solo_with_explicit_second_actor_is_not_solo_evidence(self):
+  self.assertFalse(caption_asserts_single_person(
+      "Only one woman stands in the foreground, but another man is behind her."))
+ def test_negated_second_person_is_not_extra_person_evidence(self):
+  caption=("One woman in a green coat stands alone in the marketplace. "
+           "No second person is visible anywhere in the scene.")
+  self.assertEqual(scene_caption_conflicts(
+      [{"name":"Mira","outfit":"green coat"}],caption),[])
+ def test_negated_two_people_is_not_extra_person_evidence(self):
+  caption=("One woman wearing a green coat stands in the market square. "
+           "There are not two people visible in the frame.")
+  self.assertEqual(scene_caption_conflicts(
+      [{"name":"Mira","outfit":"green coat"}],caption),[])
+ def test_mixed_negation_and_actual_extra_still_rejected(self):
+  caption=("No second person is near the foreground, but another woman "
+           "stands clearly at the market gate behind the main woman.")
+  self.assertIn("Neural CG contains an additional principal figure according to VLM",
+      scene_caption_conflicts([{"name":"Mira","outfit":"green coat"}],caption))
+ def test_negated_multiple_count_preserves_valid_solo(self):
+  self.assertTrue(caption_asserts_single_person(
+      "There is only one person visible, not two people."))
  def test_generic_indefinite_is_not_solo(self):
   self.assertFalse(caption_asserts_single_person("A woman wears a coat. A man stands next to her."))
 if __name__=="__main__":
