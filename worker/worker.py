@@ -888,6 +888,7 @@ def head_crop(sprite):
     return clipped.crop((x+side,y+side,x+side*2,y+side*2)).convert("RGB")
 
 def assess(job,raw,background):
+    assess_t0=time.monotonic()
     kind=job["kind"]
     reasons=[]
     metrics={}
@@ -962,6 +963,9 @@ def assess(job,raw,background):
     semantic="unavailable"
     warnings=[]
     qa_t0=time.monotonic()
+    # This span includes image decode, matte/cutout and final PNG encode,
+    # which happen before the existing QA stopwatch starts.
+    metrics["qa_presemantic_ms"]=round(max(0,(qa_t0-assess_t0)*1000),3)
     # Cheap DWPose geometry before expensive CPU VLM: mismatched poses are
     # rejected without spending ~25s asking the VLM to describe other details.
     spec=job.get("spec") or {}
@@ -1157,7 +1161,9 @@ def assess(job,raw,background):
         evidence["action"]={"verdict":verdict(metrics.get("scene_action_verified"),
                               features.get("ground_pose") is True),
                             "features":features}
-    qa_ms=(time.monotonic()-qa_t0)*1000
+    qa_t1=time.monotonic()
+    qa_ms=(qa_t1-qa_t0)*1000
+    metrics["qa_assess_total_ms"]=round(max(0,(qa_t1-assess_t0)*1000),3)
     # Explicit unattributed residue: do not call it network or CLIP time.
     metrics["qa_remaining_ms"]=round(max(0,qa_ms-
         metrics.get("qa_pose_geometry_ms",0)-
