@@ -15,6 +15,7 @@ import sys
 import time
 
 import coordinator as c
+import golden_evidence as ge
 
 LANES={'R':'renderer','Q':'qa','G':'golden','S':'reliability'}
 ROOT=Path(__file__).resolve().parent.parent
@@ -86,6 +87,7 @@ def open_db():
     db=c.database(DB)
     db.execute('CREATE TABLE IF NOT EXISTS team_meta(k TEXT PRIMARY KEY,v TEXT NOT NULL)')
     db.execute('CREATE TABLE IF NOT EXISTS claim_baselines(task_id TEXT PRIMARY KEY, head TEXT NOT NULL)')
+    ge.ensure_schema(db)
     return db
 
 def initialize():
@@ -116,14 +118,21 @@ def claim(db,lane,owner):
     if git(lane,'status','--porcelain','--untracked-files=all'):
         return {'claimed':False,'reason':'dirty_worktree_needs_review'}
     # Check every queued scope before a worker gets write access.
-    for pending in db.execute("SELECT paths FROM task WHERE id LIKE ? AND state='pending'", (lane+'-%',)):
-        _checked_scope(lane, json.loads(pending['paths']))
+    for pending in db.execute("SELECT paths,action FROM task WHERE id LIKE ? AND state='pending'", (lane+'-%',)):
+        scope=json.loads(pending['paths'])
+        if pending['action']=='visual_evidence':
+            if lane!='G' or scope!=[]:
+                raise ValueError('invalid visual-evidence task scope')
+        else:
+            _checked_scope(lane, scope)
     # Co.claim is serialized by BEGIN IMMEDIATE, with a narrow lane prefix.
     item=c.claim(db,owner,ttl=2700,lane=lane)
     if item is None:return {'claimed':False,'reason':'no_unclaimed_ready_task'}
-    db.execute('INSERT OR REPLACE INTO claim_baselines(task_id,head) VALUES(?,?)',(item['id'],git(lane,'rev-parse','HEAD')))
-    task=db.execute('SELECT paths FROM task WHERE id=?',(item['id'],)).fetchone()
-    return {'claimed':True,**item,'lane':lane,'worktree':str(ROOT/('lane-'+LANES[lane])), 'paths':json.loads(task[0])}
+    if item['action']!='visual_evidence':
+        db.execute('INSERT OR REPLACE INTO claim_baselines(task_id,head) VALUES(?,?)',(item['id'],git(lane,'rev-parse','HEAD')))
+    task=db.execute('SELECT paths,action FROM task WHERE id=?',(item['id'],)).fetchone()
+    return {'claimed':True,**item,'lane':lane,'worktree':str(ROOT/('lane-'+LANES[lane])),
+            'paths':json.loads(task['paths'])}
 
 def submit(db,lane,owner,fence,tid,file):
     assert_current_boot(db)
@@ -174,7 +183,9 @@ def submit(db,lane,owner,fence,tid,file):
 def review(db,task_id,approve,note,verified_commit_sha=None):
     if not isinstance(note,str) or len(note.strip())<12:
         raise ValueError('independent review note required')
-    x=db.execute('SELECT state,result,paths FROM task WHERE id=?',(task_id,)).fetchone()
+    x=db.execute('SELECT state,result,paths,action FROM task WHERE id=?',(task_id,)).fetchone()
+    if x and x['action']=='visual_evidence':
+        raise ValueError('visual receipt requires independent review-visual')
     if not x or x['state']!='review_pending':
         return {'approved':False,'reason':'not pending'}
     doc=json.loads(x['result'])
@@ -282,6 +293,9 @@ def main():
     cc=subs.add_parser('heartbeat');cc.add_argument('--task',required=True);cc.add_argument('--owner',required=True);cc.add_argument('--fence',required=True)
     cc=subs.add_parser('submit');cc.add_argument('--lane',choices=LANES,required=True);cc.add_argument('--task',required=True);cc.add_argument('--owner',required=True);cc.add_argument('--fence',required=True);cc.add_argument('--evidence',required=True)
     cc=subs.add_parser('review');cc.add_argument('--task',required=True);cc.add_argument('--approve',action='store_true');cc.add_argument('--note',required=True);cc.add_argument('--verified-commit')
+    cc=subs.add_parser('enqueue-visual');cc.add_argument('--spec',required=True)
+    cc=subs.add_parser('submit-visual');cc.add_argument('--task',required=True);cc.add_argument('--owner',required=True);cc.add_argument('--fence',required=True);cc.add_argument('--evidence',required=True)
+    cc=subs.add_parser('review-visual');cc.add_argument('--task',required=True);cc.add_argument('--reviewer',required=True);cc.add_argument('--approve',action='store_true');cc.add_argument('--note',required=True);cc.add_argument('--verified-png-sha')
     cc=subs.add_parser('enqueue');cc.add_argument('--spec',required=True)
     cc=subs.add_parser('stop');cc.add_argument('--reason',required=True)
     args=p.parse_args()
@@ -296,6 +310,15 @@ def main():
             result={'accepted':c.heartbeat(db,args.task,args.owner,args.fence,ttl=2700)}
         elif args.cmd=='submit':result=submit(db,args.lane,args.owner,args.fence,args.task,args.evidence)
         elif args.cmd=='review':result=review(db,args.task,args.approve,args.note,args.verified_commit)
+        elif args.cmd=='enqueue-visual':
+            assert_current_boot(db)
+            result=ge.enqueue(db,json.loads(Path(args.spec).read_text()))
+        elif args.cmd=='submit-visual':
+            assert_current_boot(db)
+            result=ge.submit(db,args.task,args.owner,args.fence,args.evidence)
+        elif args.cmd=='review-visual':
+            assert_current_boot(db)
+            result=ge.review(db,args.task,args.reviewer,args.approve,args.note,args.verified_png_sha)
         elif args.cmd=='enqueue':
             d=json.loads(Path(args.spec).read_text())
             if d['lane'] not in LANES or not d['id'].startswith(d['lane']+'-'):

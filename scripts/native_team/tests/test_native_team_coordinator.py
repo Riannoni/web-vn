@@ -104,6 +104,14 @@ class PilotTests(unittest.TestCase):
                 m.persist_evidence(folder,"../malicious","fence1",b"overwrite")
             self.assertEqual(path.read_bytes(),b"proof")
 
+    def test_legacy_source_worker_cannot_accidentally_consume_golden_visual_job(self):
+        m.add(self.db, "G-99", "visual_evidence", [], goal="Original pixel evidence")
+        self.assertIsNone(m.claim(self.db,"legacy-source",now=100,
+                                  allowed_actions={"source_inventory","source_compile"}))
+        x=m.claim(self.db,"golden-worker",now=100,lane="G")
+        self.assertEqual(x["id"],"G-99")
+        self.assertEqual(x["action"],"visual_evidence")
+
     def test_evidence_is_required(self):
         self.add()
         x=m.claim(self.db,"w1",now=100)
