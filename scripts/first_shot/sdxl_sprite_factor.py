@@ -13,8 +13,10 @@ import copy
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import sys
 import time
 
@@ -45,10 +47,51 @@ def _require_sha(s, label):
 
 
 def _read_pinned(path, sha, *, max_bytes=8_000_000):
+    """Read exact hash-pinned bytes without following *any* path component.
+
+    O_NOFOLLOW only on the leaf is insufficient: a mutable private_sources,
+    creation_receipts or private_assets ancestor can redirect a read. Open
+    directories from / using dirfd + O_DIRECTORY|O_NOFOLLOW and then read the
+    regular leaf by its already-open file descriptor.
+    """
     _require_sha(sha, "pinned")
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > max_bytes:
+    path = Path(path)
+    parts = path.parts
+    if (not path.is_absolute() or len(parts) < 2 or
+            any(part in ("", ".", "..") for part in parts[1:]) or
+            not isinstance(max_bytes, int) or max_bytes < 1):
         raise ValueError("missing_or_unsafe_private_source")
-    raw = path.read_bytes()
+    dirflags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    leaf_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        directory_fd = os.open("/", dirflags)
+        try:
+            for component in parts[1:-1]:
+                next_fd = os.open(component, dirflags, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = next_fd
+            file_fd = os.open(parts[-1], leaf_flags, dir_fd=directory_fd)
+            try:
+                st = os.fstat(file_fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
+                    raise ValueError("missing_or_unsafe_private_source")
+                pieces = []
+                remaining = max_bytes + 1
+                while remaining:
+                    piece = os.read(file_fd, min(65536, remaining))
+                    if not piece:
+                        break
+                    pieces.append(piece)
+                    remaining -= len(piece)
+                raw = b"".join(pieces)
+                if len(raw) > max_bytes:
+                    raise ValueError("missing_or_unsafe_private_source")
+            finally:
+                os.close(file_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        raise ValueError("missing_or_unsafe_private_source") from exc
     if digest(raw) != sha:
         raise ValueError("private_source_sha_changed")
     return raw
