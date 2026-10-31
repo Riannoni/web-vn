@@ -12,6 +12,9 @@ import datetime as dt
 import hashlib
 import json
 import math
+import os
+import stat
+from collections import Counter
 from pathlib import Path
 import sys
 
@@ -50,25 +53,62 @@ def percentiles(values: list[float]) -> dict:
     return {"n": len(values), "p50_ms": p(0.5), "p90_ms": p(0.9)}
 
 
+def checked_timestamp(value: object, label: str) -> dt.datetime:
+    if not isinstance(value, str):
+        raise AuditError(label + "_missing_or_invalid")
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise AuditError(label + "_missing_or_invalid") from exc
+    if parsed.utcoffset() is None:
+        raise AuditError(label + "_missing_or_invalid")
+    return parsed
+
+
 def summarize_job(job: object) -> dict:
     if not isinstance(job, dict):
         raise AuditError("job_not_object")
     job_id = job.get("id")
     if not isinstance(job_id, str) or not job_id:
         raise AuditError("job_identity_missing")
-    if job.get("status") not in COMPLETED:
+    status = job.get("status")
+    if not isinstance(status, str) or status not in COMPLETED:
         raise AuditError("nonterminal_job")
     attempts = job.get("attempt_history")
     if not isinstance(attempts, list) or not attempts:
         raise AuditError("attempt_history_missing")
     values = []
+    prior_finished = None
     for index, attempt in enumerate(attempts, 1):
-        if not isinstance(attempt, dict) or attempt.get("number") != index or isinstance(attempt.get("number"), bool):
+        if not isinstance(attempt, dict) or type(attempt.get("number")) is not int or attempt["number"] != index:
             raise AuditError("attempt_number_not_contiguous")
+        claimed = checked_timestamp(attempt.get("claimed_at"), "attempt_claimed_at")
+        finished = checked_timestamp(attempt.get("finished_at"), "attempt_finished_at")
+        if finished < claimed or (prior_finished is not None and claimed < prior_finished):
+            raise AuditError("attempt_timestamp_order_invalid")
+        prior_finished = finished
+        outcome = attempt.get("outcome")
+        if not isinstance(outcome, str) or outcome not in (
+            "done", "failed", "superseded", "timed_out", "rejected", "retry"
+        ):
+            raise AuditError("attempt_outcome_nonterminal")
+        if index == len(attempts):
+            expected = {
+                "done": frozenset(("done",)),
+                "failed": frozenset(("failed", "timed_out")),
+                "superseded": frozenset(("superseded", "timed_out")),
+            }[status]
+            if outcome not in expected:
+                raise AuditError("terminal_attempt_outcome_mismatch")
         times = attempt.get("timings")
         if not isinstance(times, dict):
             raise AuditError("attempt_timings_missing")
         values.append(milliseconds(times.get("qa_ms"), "attempt_qa_ms"))
+    recorded_attempts = job.get("attempts")
+    if recorded_attempts is not None and (
+        type(recorded_attempts) is not int or recorded_attempts != len(attempts)
+    ):
+        raise AuditError("attempt_count_inconsistent")
     if not isinstance(job.get("timings"), dict):
         raise AuditError("job_timings_missing")
     cumulative = milliseconds(job["timings"].get("qa_ms"), "job_qa_ms")
@@ -92,7 +132,7 @@ def summarize_job(job: object) -> dict:
 
 
 def audit_directory(directory: Path, as_of: dt.datetime, lookback_hours: float) -> dict:
-    if not directory.is_dir():
+    if directory.is_symlink() or not directory.is_dir():
         raise AuditError("jobs_directory_unavailable")
     if as_of.utcoffset() is None:
         raise AuditError("as_of_timezone_required")
@@ -100,21 +140,51 @@ def audit_directory(directory: Path, as_of: dt.datetime, lookback_hours: float) 
         raise AuditError("lookback_hours_out_of_bounds")
     end = as_of.timestamp()
     start = end - lookback_hours*3600
-    files = sorted(f for f in directory.glob("*.json") if f.is_file() and start <= f.stat().st_mtime <= end)
-    hashes, rows, reasons, seen = [], [], {}, set()
-    for f in files:
-        content = f.read_bytes()
+    hashes, candidates, reasons = [], [], {}
+    for f in sorted(directory.glob("*.json")):
+        # Never follow candidate symlinks, including ones outside the mtime window.
+        if f.is_symlink():
+            raise AuditError("job_symlink_unsupported")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(f, flags)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise AuditError("job_not_regular")
+            if not start <= info.st_mtime <= end:
+                continue
+            with os.fdopen(fd, "rb") as source:
+                fd = -1
+                content = source.read()
+        finally:
+            if fd >= 0:
+                os.close(fd)
         hashes.append(hashlib.sha256(content).hexdigest())
         try:
             job = json.loads(content)
+            identifier = job.get("id") if isinstance(job, dict) else None
+            identifier = identifier if isinstance(identifier, str) and identifier else None
             row = summarize_job(job)
-            if row["id"] in seen:
-                raise AuditError("duplicate_job_identity")
-            seen.add(row["id"])
+            candidates.append((identifier, row, None))
+        except AuditError as exc:
+            candidates.append((identifier if "identifier" in locals() else None, None, str(exc)))
+        except (ValueError, UnicodeDecodeError):
+            candidates.append((None, None, "invalid_json"))
+        finally:
+            # A failed JSON decode must not inherit an ID from the previous file.
+            if "identifier" in locals():
+                del identifier
+    counts = Counter(identifier for identifier, _, _ in candidates if identifier is not None)
+    rows = []
+    for identifier, row, error in candidates:
+        if identifier is not None and counts[identifier] > 1:
+            reason = "ambiguous_duplicate_job_identity"
+        else:
+            reason = error
+        if reason is None:
             rows.append(row)
-        except (AuditError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            key = str(exc) if isinstance(exc, AuditError) else "invalid_json"
-            reasons[key] = reasons.get(key, 0)+1
+        else:
+            reasons[reason] = reasons.get(reason, 0) + 1
     cumulative = sum(row["cumulative_qa_ms"] for row in rows)
     previous = sum(row["previous_qa_ms"] for row in rows)
     stats = {key: percentiles([row[key] for row in rows if row[key] is not None])
@@ -126,8 +196,8 @@ def audit_directory(directory: Path, as_of: dt.datetime, lookback_hours: float) 
         "as_of_utc": as_of.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "lookback_hours": lookback_hours,
         "sample_selection": "file_mtime_window_including_failed_and_superseded",
-        "raw_file_count": len(files), "valid_job_count": len(rows),
-        "excluded_job_count": len(files)-len(rows), "excluded_by_reason": dict(sorted(reasons.items())),
+        "raw_file_count": len(hashes), "valid_job_count": len(rows),
+        "excluded_job_count": len(hashes)-len(rows), "excluded_by_reason": dict(sorted(reasons.items())),
         "raw_file_sha256_manifest": hashlib.sha256("\n".join(sorted(hashes)).encode()).hexdigest(),
         "attempt_count": sum(r["attempts"] for r in rows),
         "retried_job_count": sum(r["attempts"] > 1 for r in rows),
@@ -168,8 +238,11 @@ def main(argv=None) -> int:
     args=ap.parse_args(argv)
     try:
         result=audit_directory(args.jobs_dir,parse_utc(args.as_of),args.lookback_hours)
-    except (AuditError,OSError) as exc:
+    except AuditError as exc:
         print("EVIDENCE_BLOCKED: "+str(exc),file=sys.stderr)
+        return 2
+    except OSError:
+        print("EVIDENCE_BLOCKED: filesystem_access_error",file=sys.stderr)
         return 2
     print(json.dumps(result,sort_keys=True,ensure_ascii=False))
     return 0
