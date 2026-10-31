@@ -200,6 +200,33 @@ class CohortTests(unittest.TestCase):
             os.utime(p, (AS_OF.timestamp() + 1,) * 2)
             self.assertEqual(module.audit_directory(d, AS_OF, 48)["raw_file_count"], 0)
 
+    def test_as_of_fences_historical_attempt_events_not_only_file_mtime(self):
+        # Frozen historical audit: all three file mtimes predate cutoff.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            control = job("control", qa=(1000,), vlm=0.8, status="done")
+            control["attempt_history"][0]["claimed_at"] = "2026-10-31T16:57:00Z"
+            control["attempt_history"][0]["finished_at"] = "2026-10-31T16:58:00Z"
+            write_job(d, "control.json", control, seconds_before=10)
+            before = module.audit_directory(d, AS_OF, 48)
+            self.assertEqual(before["valid_job_count"], 1)
+
+            late_finish = json.loads(json.dumps(control))
+            late_finish["id"] = "late_finish"
+            late_finish["attempt_history"][0]["claimed_at"] = "2026-10-31T16:59:00Z"
+            late_finish["attempt_history"][0]["finished_at"] = "2026-10-31T17:01:00Z"
+            write_job(d, "late-finish.json", late_finish, seconds_before=10)
+            future_both = json.loads(json.dumps(control))
+            future_both["id"] = "future_both"
+            future_both["attempt_history"][0]["claimed_at"] = "2026-11-01T00:01:00+07:00"
+            future_both["attempt_history"][0]["finished_at"] = "2026-11-01T00:02:00+07:00"
+            write_job(d, "future-both.json", future_both, seconds_before=10)
+            result = module.audit_directory(d, AS_OF, 48)
+            self.assertEqual(result["raw_file_count"], 3)
+            self.assertEqual(result["valid_job_count"], 1)
+            self.assertEqual(result["excluded_by_reason"], {"attempt_after_as_of": 2})
+            self.assertEqual(result["qa_totals_ms"]["all_attempts"], 1000)
+
     def test_timezone_and_bounds(self):
         with self.assertRaises(module.AuditError):
             module.parse_utc("2026-10-31T17:00:00")
