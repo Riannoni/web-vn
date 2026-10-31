@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import secrets
 import sys
 import time
 
@@ -302,66 +303,122 @@ def build(root, p, prefix, *, comfy_input=None):
     }
 
 
-def derive_rgba_candidate(root, experiment_id, original_png_path, original_sha256):
-    """Derive a PRIVATE RGBA candidate from the exact Comfy original; no G2 or publish.
+def _open_nofollow_run_directory(run_dir):
+    """Pin the actual output directory fd; reject symlinks in every ancestor."""
+    path = Path(run_dir).expanduser()
+    parts = path.parts
+    if not path.is_absolute() or any(x in ("", ".", "..") for x in parts[1:]):
+        raise ValueError("missing_private_sprite_run")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open("/", flags)
+    try:
+        for part in parts[1:]:
+            next_fd = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except OSError as exc:
+        os.close(fd)
+        raise ValueError("missing_private_sprite_run") from exc
+    except BaseException:
+        os.close(fd)
+        raise
 
-    This deterministic postprocessing is identical for a baseline and candidate:
-    it is not a second model/conditioning factor. Only GPU Lab calls it after
-    exact Comfy prompt/history attribution. An unsafe matte blocks eligibility.
-    Golden must independently inspect both the original and derived pixels.
+
+def derive_rgba_candidate(root, experiment_id, original_png_path, original_sha256):
+    """Generate a private, nonpublishable RGBA from pinned original bytes.
+
+    Both filesystem boundaries are fd-pinned: every original-file ancestor
+    must be a genuine directory, and the exclusive output is created via
+    the already-open private runs/<id> directory descriptor. No path-based
+    reopen between validation and write. GPU Lab remains the sole caller
+    after exact Comfy output attribution; Golden reviews both pixel sources.
     """
-    from firstshot_source_matte import extract_matte_file
+    from firstshot_source_matte import extract_matte
     from PIL import Image, ImageFile
 
     if not isinstance(experiment_id, str) or not re.fullmatch(r"[A-Z][A-Z0-9_-]{5,55}", experiment_id):
         raise ValueError("invalid_sprite_experiment_id")
     _require_sha(original_sha256, "comfy_original")
-    root = Path(root).expanduser().resolve()
+    root = Path(root).expanduser().absolute()
     run_dir = root / "runs" / experiment_id
-    if not run_dir.is_dir() or run_dir.is_symlink():
-        raise ValueError("missing_private_sprite_run")
-    original = Path(original_png_path)
-    if original.is_symlink() or not original.is_file():
-        raise ValueError("unsafe_original_comfy_png")
-    if ImageFile.LOAD_TRUNCATED_IMAGES:
-        raise ValueError("unsafe_truncated_png_decoder_policy")
-    target = run_dir / "sprite-rgba-candidate.png"
-    if target.exists() or target.is_symlink():
-        raise ValueError("derived_sprite_output_exists_no_overwrite")
-
-    started = time.perf_counter()
-    # extract_matte_file reads original bytes and cryptographically rechecks
-    # the SHA from Comfy, rather than trusting a second path/mtime or a preview.
-    report = extract_matte_file(original, target, expected_sha256=original_sha256)
-    raw = target.read_bytes()
-    if digest(raw) != report.get("derived_sha256"):
-        raise ValueError("derived_sprite_sha_changed")
+    run_fd = _open_nofollow_run_directory(run_dir)
     try:
-        with Image.open(io.BytesIO(raw)) as im:
-            if im.format != "PNG" or im.mode != "RGBA" or list(im.size) != report.get("size"):
-                raise ValueError("derived_sprite_format_or_canvas_invalid")
-            im.load()
-            lo, hi = im.getchannel("A").getextrema()
-            if lo != 0 or hi != 255:
-                raise ValueError("derived_sprite_has_no_full_alpha_range")
-    except (OSError, SyntaxError, Image.DecompressionBombError) as exc:
-        raise ValueError("invalid_derived_sprite_png_pixels") from exc
-    if (report.get("stage0") != "PASS" or report.get("stage1") != "PASS"
-            or report.get("g2") != "UNVERIFIED" or report.get("publishable") is not False
-            or report.get("canonical_identity_verified") is not False
-            or report.get("wardrobe_verified") is not False):
-        raise ValueError("matte_report_must_not_claim_visual_approval")
-    return {
-        "original_png_sha256": original_sha256,
-        "derived_rgba_sha256": report["derived_sha256"],
-        "derived_rgba_path": str(target),
-        "rgba_postprocess_seconds": round(time.perf_counter() - started, 3),
-        "rgba_stage0": "PASS",
-        "rgba_stage1": "PASS",
-        "rgba_stage2": "INDEPENDENT_ORIGINAL_AND_DERIVED_PIXEL_REVIEW_REQUIRED",
-        "alpha_status": "DERIVED_RGBA_CANDIDATE_G2_UNVERIFIED",
-        "publish_eligible": False,
-        "g2": "NOT_REVIEWED",
-        "published": False,
-        "human_labeled": False,
-    }
+        name = "sprite-rgba-candidate.png"
+        try:
+            os.stat(name, dir_fd=run_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ValueError("derived_sprite_output_exists_no_overwrite")
+        if ImageFile.LOAD_TRUNCATED_IMAGES:
+            raise ValueError("unsafe_truncated_png_decoder_policy")
+        started = time.perf_counter()
+        original_path = Path(original_png_path).expanduser().absolute()
+        try:
+            original_bytes = _read_pinned(
+                original_path, original_sha256, max_bytes=MAX_PRIVATE_IMAGE)
+        except ValueError as exc:
+            if str(exc) == "private_source_sha_changed":
+                raise ValueError("frozen source SHA256 mismatch") from exc
+            raise
+        # The matte consumes the same immutable SHA-checked original bytes;
+        # PIL must fully decode them. No second path read or TOCTOU window.
+        with Image.open(io.BytesIO(original_bytes)) as original:
+            if original.format != "PNG":
+                raise ValueError("not_original_png")
+            original.load()
+            rgba, report = extract_matte(original)
+        if (report.get("stage0") != "PASS" or report.get("stage1") != "PASS"
+                or report.get("g2") != "UNVERIFIED" or report.get("publishable") is not False
+                or report.get("canonical_identity_verified") is not False
+                or report.get("wardrobe_verified") is not False):
+            raise ValueError("matte_report_must_not_claim_visual_approval")
+        buf = io.BytesIO()
+        rgba.save(buf, format="PNG")
+        raw = buf.getvalue()
+        derived_sha = digest(raw)
+        try:
+            with Image.open(io.BytesIO(raw)) as im:
+                if im.format != "PNG" or im.mode != "RGBA" or list(im.size) != report.get("size"):
+                    raise ValueError("derived_sprite_format_or_canvas_invalid")
+                im.load()
+                if im.getchannel("A").getextrema() != (0, 255):
+                    raise ValueError("derived_sprite_has_no_full_alpha_range")
+        except (OSError, SyntaxError, Image.DecompressionBombError) as exc:
+            raise ValueError("invalid_derived_sprite_png_pixels") from exc
+
+        # Temporary and final entries are created under the PINNED directory
+        # fd: changing a parent path cannot redirect the actual write.
+        scratch = ".rgba-" + secrets.token_hex(16) + ".tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        output_fd = os.open(scratch, flags, 0o600, dir_fd=run_fd)
+        try:
+            with os.fdopen(output_fd, "wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(scratch, name, src_dir_fd=run_fd,
+                        dst_dir_fd=run_fd, follow_symlinks=False)
+            except FileExistsError as exc:
+                raise ValueError("derived_sprite_output_exists_no_overwrite") from exc
+        finally:
+            os.unlink(scratch, dir_fd=run_fd)
+
+        return {
+            "original_png_sha256": original_sha256,
+            "derived_rgba_sha256": derived_sha,
+            "derived_rgba_path": str(run_dir / name),
+            "rgba_postprocess_seconds": round(time.perf_counter() - started, 3),
+            "rgba_stage0": "PASS",
+            "rgba_stage1": "PASS",
+            "rgba_stage2": "INDEPENDENT_ORIGINAL_AND_DERIVED_PIXEL_REVIEW_REQUIRED",
+            "alpha_status": "DERIVED_RGBA_CANDIDATE_G2_UNVERIFIED",
+            "publish_eligible": False,
+            "g2": "NOT_REVIEWED",
+            "published": False,
+            "human_labeled": False,
+        }
+    finally:
+        os.close(run_fd)
