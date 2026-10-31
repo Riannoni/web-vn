@@ -303,6 +303,21 @@ def build(root, p, prefix, *, comfy_input=None):
     }
 
 
+def _platform_home_alias(path):
+    """Allow only Bazzite's fixed root-owned /home -> /var/home alias.
+
+    Do not call Path.resolve() on an untrusted run/output/source tree: it
+    silently follows arbitrary private ancestors. The remaining components
+    are subsequently opened with O_NOFOLLOW.
+    """
+    p = Path(path).expanduser().absolute()
+    if len(p.parts) > 1 and p.parts[1] == "home" and os.path.islink("/home"):
+        if os.readlink("/home") not in ("var/home", "/var/home"):
+            raise ValueError("unsafe_system_home_alias")
+        p = Path("/var/home").joinpath(*p.parts[2:])
+    return p
+
+
 def _open_nofollow_run_directory(run_dir):
     """Pin the actual output directory fd; reject symlinks in every ancestor."""
     path = Path(run_dir).expanduser()
@@ -340,7 +355,7 @@ def derive_rgba_candidate(root, experiment_id, original_png_path, original_sha25
     if not isinstance(experiment_id, str) or not re.fullmatch(r"[A-Z][A-Z0-9_-]{5,55}", experiment_id):
         raise ValueError("invalid_sprite_experiment_id")
     _require_sha(original_sha256, "comfy_original")
-    root = Path(root).expanduser().absolute()
+    root = _platform_home_alias(root)
     run_dir = root / "runs" / experiment_id
     run_fd = _open_nofollow_run_directory(run_dir)
     try:
@@ -354,7 +369,7 @@ def derive_rgba_candidate(root, experiment_id, original_png_path, original_sha25
         if ImageFile.LOAD_TRUNCATED_IMAGES:
             raise ValueError("unsafe_truncated_png_decoder_policy")
         started = time.perf_counter()
-        original_path = Path(original_png_path).expanduser().absolute()
+        original_path = _platform_home_alias(original_png_path)
         try:
             original_bytes = _read_pinned(
                 original_path, original_sha256, max_bytes=MAX_PRIVATE_IMAGE)
