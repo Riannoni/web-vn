@@ -14,7 +14,9 @@ class ContractBlocked(ValueError):
     pass
 
 def _outfit(value):
-    s=" ".join(str(value or "").split())
+    if not isinstance(value, str):
+        raise ContractBlocked("Current outfit must be a string")
+    s=" ".join(value.split())
     if not s or s.lower() in ("default","unknown","unspecified") or len(s)>320:
         raise ContractBlocked("Current outfit is not explicitly bound")
     return s
