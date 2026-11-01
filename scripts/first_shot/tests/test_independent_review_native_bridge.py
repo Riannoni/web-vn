@@ -59,6 +59,13 @@ class NativeOriginalReceiptBridge(unittest.TestCase):
         original_sha = sha(self.original.read_bytes())
         self.derived = self.rundir / "sprite-rgba-candidate.png"
         self.derived.write_bytes(png(rgba=True))
+        run_st, file_st = self.rundir.stat(), self.derived.stat()
+        self.inode_binding = {
+            "derived_rgba_run_dev": run_st.st_dev,
+            "derived_rgba_run_ino": run_st.st_ino,
+            "derived_rgba_file_dev": file_st.st_dev,
+            "derived_rgba_file_ino": file_st.st_ino,
+        }
         self.candidate = {
             "id": self.name, "case": "SPRITE-CANONICAL",
             "factor": "sdxl_sprite_body_source",
@@ -67,7 +74,8 @@ class NativeOriginalReceiptBridge(unittest.TestCase):
             "original_png_sha256": original_sha,
             "derived_rgba_path": str(self.derived),
             "derived_rgba_sha256": sha(self.derived.read_bytes()),
-            "g2": "NOT_REVIEWED", "published": False
+            "g2": "NOT_REVIEWED", "published": False,
+            **self.inode_binding,
         }
         self.review = {
             "experiment_id": self.name, "reviewer_task": self.task_id,
@@ -93,7 +101,8 @@ class NativeOriginalReceiptBridge(unittest.TestCase):
             "case": self.candidate["case"], "png_sha256": original_sha,
             "original_png_path": str(self.original),
             "derived_rgba_path": str(self.derived),
-            "derived_rgba_sha256": self.candidate["derived_rgba_sha256"]
+            "derived_rgba_sha256": self.candidate["derived_rgba_sha256"],
+            **self.inode_binding,
         }
         self.desc["gpu_receipt"] = self.artifact("gpu.json", blob(source))
         self.spec = {
@@ -209,7 +218,7 @@ class NativeOriginalReceiptBridge(unittest.TestCase):
 
     def test_missing_derived_rgba_keeps_candidate_held(self):
         self.derived.unlink()
-        self.assert_denied_without_transition("sprite_derivative_missing_or_untrusted")
+        self.assert_denied_without_transition("derived_rgba_path_rebound")
 
     def test_valid_but_substituted_rgba_sha_not_bound_to_native_review(self):
         # The replacement is a technically sound RGBA, not a corrupt file.
@@ -223,6 +232,24 @@ class NativeOriginalReceiptBridge(unittest.TestCase):
         self.candidate["derived_rgba_sha256"] = sha(changed)
         self.save()  # native GPU/source receipt deliberately still binds the old derivative
         self.assert_denied_without_transition("trusted_sprite_derivative_not_in_native_gpu_receipt")
+
+    def test_repinning_mutable_inode_cannot_override_native_gpu_receipt(self):
+        # The replacement contains IDENTICAL bytes; immutable GPU receipt
+        # still pins the original run and final-file inode identities.
+        displaced = self.lab / "displaced-original-run"
+        self.rundir.rename(displaced)
+        self.rundir.mkdir()
+        moved_bytes = (displaced / "sprite-rgba-candidate.png").read_bytes()
+        (self.rundir / "sprite-rgba-candidate.png").write_bytes(moved_bytes)
+        r, f = self.rundir.stat(), (self.rundir / "sprite-rgba-candidate.png").stat()
+        self.candidate.update({
+            "derived_rgba_run_dev": r.st_dev,
+            "derived_rgba_run_ino": r.st_ino,
+            "derived_rgba_file_dev": f.st_dev,
+            "derived_rgba_file_ino": f.st_ino,
+        })
+        self.save()
+        self.assert_denied_without_transition("trusted_sprite_inode_binding_mismatch")
 
     def test_native_sprite_factor_spoof_cannot_skip_missing_final_rgba(self):
         # Native typed contract and GPU receipt still require sprite_alpha/RGBA;

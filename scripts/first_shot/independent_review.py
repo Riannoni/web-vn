@@ -128,6 +128,13 @@ def _trusted_original_review(candidate, review):
         if (bound_source.get("derived_rgba_sha256") != candidate.get("derived_rgba_sha256")
                 or bound_source.get("derived_rgba_path") != candidate.get("derived_rgba_path")):
             raise ValueError("trusted_sprite_derivative_not_in_native_gpu_receipt")
+        # The reviewer must not trust inode fields newly chosen in a mutable
+        # result.json. They must also match the pinned native GPU receipt.
+        for key in ("derived_rgba_run_dev", "derived_rgba_run_ino",
+                    "derived_rgba_file_dev", "derived_rgba_file_ino"):
+            if (type(bound_source.get(key)) is not int
+                    or bound_source[key] != candidate.get(key)):
+                raise ValueError("trusted_sprite_inode_binding_mismatch")
     original_raw = native_golden._private_file(spec["artifacts"]["original_png"], "original_png")
     _full_png(original_raw)
     return mandatory
@@ -147,14 +154,20 @@ def _trusted_sprite_derivative(root, name, candidate):
     if (not isinstance(path_value, str) or not isinstance(expected, str)
             or re.fullmatch(r"[a-f0-9]{64}", expected) is None):
         raise ValueError("sprite_derivative_missing")
-    path = Path(path_value)
-    private_run = (root / "runs" / name).resolve()
-    if path.is_symlink() or not path.is_file() or path.resolve().parent != private_run:
-        raise ValueError("sprite_derivative_missing_or_untrusted")
-    raw = path.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != expected:
-        raise ValueError("sprite_derivative_sha_mismatch")
-    original_size = _full_png(Path(candidate["original_png_path"]).read_bytes())
+    # A producer-side pathname check cannot pin bytes for this later reader.
+    # Reopen under nofollow dirfds, verify the recorded run/file inodes and
+    # SHA, then use only the returned verified bytes at the point of review.
+    from sdxl_sprite_factor import (
+        read_bound_rgba_bytes, _platform_home_alias, _read_pinned
+    )
+    raw = read_bound_rgba_bytes(root, name, candidate)
+    # A second unfenced read of the original could silently use different
+    # pixels with the same canvas after the trusted receipt was checked.
+    original_raw = _read_pinned(
+        _platform_home_alias(candidate["original_png_path"]),
+        candidate["png_sha256"], max_bytes=64_000_000
+    )
+    original_size = _full_png(original_raw)
     if _full_png(raw, require_rgba=True) != original_size:
         raise ValueError("sprite_derivative_canvas_mismatch")
 

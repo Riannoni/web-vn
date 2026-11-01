@@ -109,6 +109,16 @@ class GoldenTrustBoundaryTests(unittest.TestCase):
         self.rf.write_text(json.dumps(self.review))
         (self.run / "result.json").write_text(json.dumps(self.candidate))
 
+    def bind_derivative(self, path):
+        run_stat = path.parent.stat()
+        file_stat = path.stat()
+        self.candidate.update({
+            "derived_rgba_run_dev": run_stat.st_dev,
+            "derived_rgba_run_ino": run_stat.st_ino,
+            "derived_rgba_file_dev": file_stat.st_dev,
+            "derived_rgba_file_ino": file_stat.st_ino,
+        })
+
     def blocked(self, pattern):
         with patch.object(m, "NATIVE_ROOT", self.native):
             with self.assertRaisesRegex(ValueError, pattern):
@@ -155,7 +165,7 @@ class GoldenTrustBoundaryTests(unittest.TestCase):
     def test_missing_derived_rgba_fails_before_any_release(self):
         self.candidate["derived_rgba_path"] = str(self.run / "missing.png")
         self.candidate["derived_rgba_sha256"] = "0" * 64
-        with self.assertRaisesRegex(ValueError, "sprite_derivative_missing_or_untrusted"):
+        with self.assertRaisesRegex(ValueError, "derived_rgba_path_rebound"):
             m._trusted_sprite_derivative(self.lab, self.name, self.candidate)
 
     def test_rgba_without_transparency_cannot_pass_technical_validation(self):
@@ -166,7 +176,8 @@ class GoldenTrustBoundaryTests(unittest.TestCase):
         derived.write_bytes(buf.getvalue())
         self.candidate["derived_rgba_path"] = str(derived)
         self.candidate["derived_rgba_sha256"] = hashlib.sha256(buf.getvalue()).hexdigest()
-        with self.assertRaisesRegex(ValueError, "derived_sprite_alpha_invalid"):
+        self.bind_derivative(derived)
+        with self.assertRaisesRegex(ValueError, "derived_rgba_pixels_invalid"):
             m._trusted_sprite_derivative(self.lab, self.name, self.candidate)
 
     def test_substituted_derived_bytes_never_pass(self):
@@ -174,7 +185,8 @@ class GoldenTrustBoundaryTests(unittest.TestCase):
         derived.write_bytes(self.original.read_bytes())
         self.candidate["derived_rgba_path"] = str(derived)
         self.candidate["derived_rgba_sha256"] = "0" * 64
-        with self.assertRaisesRegex(ValueError, "sprite_derivative_sha_mismatch"):
+        self.bind_derivative(derived)
+        with self.assertRaisesRegex(ValueError, "derived_rgba_path_sha_mismatch"):
             m._trusted_sprite_derivative(self.lab, self.name, self.candidate)
 
     def test_original_png_corrupt_idat_is_not_decoded(self):

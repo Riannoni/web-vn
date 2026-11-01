@@ -7,6 +7,8 @@ import {PNG} from "pngjs";
 const root=await fs.mkdtemp(path.join(os.tmpdir(),"vn-visual-state-"));
 process.env.VN_DATA_DIR=root;
 process.env.VN_ASSET_SECRET="test-secret";
+// Disposable source-attestation signer; production credentials are never used.
+process.env.VN_CREATION_RECEIPT_HMAC_KEY="5".repeat(64);
 const store=await import("../src/game-store.mjs");
 const jobs=await import("../src/jobs.mjs");
 const {variantKey,normalizeSprite}=await import("../src/visual-state.mjs");
@@ -39,6 +41,15 @@ async function narrative(gid,values){
    scene:{sprites:[{name:"Мира",image_url:old.scene.sprites[0].image_url,
      outfit:values.outfit||"default",emotion:values.emotion||"neutral",
      pose:values.pose||"standing"}]}});
+}
+// Commit a real test player action and narrator-authored CG prompt through
+// game-store, so neural source receipts are not reconstructed from caller text.
+async function commitAuthenticCgPrompt(gid,prompt){
+ const current=await store.gameGet(gid);
+ await store.gameAction(gid,"One disposable scene action",current.version);
+ return store.gameNarrate({game_id:gid,
+  messages:[{speaker:"Narrator",text:"The scene follows the committed action."}],
+  scene:{image_prompts:{cg:prompt}}});
 }
 test("requested wardrobe changes keep old PNG but mark it stale and invalidate CG",async()=>{
  const {gid,base}=await startReady();
@@ -92,8 +103,10 @@ test("neural CG claims and publishes even when its separate sprite is stale",asy
  await narrative(gid,{outfit:"updated scene wardrobe",pose:"leaning"});
  const before=await store.gameGet(gid);
  assert.equal(before.scene.sprites[0].visual_dirty,true);
+ const prompt="Story beat with canonical face and new camera angle";
+ await commitAuthenticCgPrompt(gid,prompt);
  const j=await jobs.enqueue({game_id:gid,kind:"scene",
-  prompt:"Story beat with canonical face and new camera angle",
+  prompt,
   neural_scene:true,narrator_prompt:true});
  assert.equal(j.spec.composition,"neural_story");
  const claim=await jobs.nextJob("gpu");
@@ -113,6 +126,7 @@ test("neural CG claims and publishes even when its separate sprite is stale",asy
 });
 test("explicit forced neural CG regeneration queues without updating transparent sprites",async()=>{
  const {gid}=await startReady();
+ await commitAuthenticCgPrompt(gid,"Current narrator-authored composition");
  const first=await jobs.enqueue({game_id:gid,kind:"scene",force:true,
   neural_scene:true,narrator_prompt:true,prompt:"Current narrator-authored composition"});
  assert.equal(first.spec.composition,"neural_story");
@@ -127,6 +141,7 @@ test("repeated unchanged neural-CG refresh deduplicates rather than superseding 
  const req={game_id:gid,kind:"scene",quality:"standard",
   prompt:"One original scene with exactly one canonical character",neural_scene:true,
   narrator_prompt:true};
+ await commitAuthenticCgPrompt(gid,req.prompt);
  const first=await jobs.enqueue(req);
  const second=await jobs.enqueue(req);
  assert.equal(second.id,first.id);
