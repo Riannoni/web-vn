@@ -84,6 +84,8 @@ Keep all 15 native workers and their schedules. New local application/tool model
 
 Use the documented SSH-MCP route; confirm target and affected services. Auth/transport failures allow at most three read-only diagnostic retries per run with actual waits 10/30/60s (no wait >60s), stopping on recovery. User-confirmed authentication repair allows a fresh diagnostic. A generic permission error is not automatically an auth failure. Safety/approval denials are distinct and must be honored; do not repeat the denied action through another agent or route.
 
+Use the operation-specific recovery table and tested adapter in [REMOTE-ACCESS](REMOTE-ACCESS.md). Preserve the original denial payload metadata and reason privately; Chief names a concrete supported resolution. A materially safer changed action can undergo normal review when the actual reduction in effect/risk is explicit; a reworded equivalent or alternate route is not clearance. Invalid tool arguments require correcting the schema, not auth retries.
+
 After recovery reconcile any prior mutation before retry. Never resubmit an unknown GPU job or run_now. Use one deduplicated incident for the same operation/context; a timestamp is not new evidence. Continue authorized independent work. Current queue/lease checks are required for GPU work, not every unrelated source read.
 
 Protect active saves, published assets and other workers' dirty trees. Known inputs are privately copied/read-only. No private images, story, refs, prompts, credentials or model weights in GitHub. Do not weaken platform controls, public service authentication or the production QA/publish path.
@@ -100,4 +102,7 @@ A candidate faster than 20s but wrong is a failure. A correct candidate slower t
 
 One handoff: experiment/owner + exact input/config/output IDs; observed pixels and measured durations; conclusion CONFIRMED/REFUTED/INCONCLUSIVE/BLOCKED; next concrete test and owner. Keep the full parameter ledger privately in one existing manifest. Public reports normally <=250 words plus a small result table. Do not repeat all historical hashes, G3 counters and unchanged blockers in every comment.
 
-If a run ends with only another HOLD report and no new artifact, test, measurement or resolved current-test blocker, say so and change the next action. PRs, commits, wakes, synthetic assertions and copied inventories are not the product scoreboard.
+Dispatcher imports the actual single-automation object from official peek with `scheduled_wake_mesh.py --record-run PRIVATE_JSON --target ROLE --requestor dispatcher`; this uses the existing SQLite, not another queue. Keep cloud completion separate from operation blockers and independently verified product evidence. Imported narrative classifications are advisory and never authorize retry, fallback, ACK or GPU execution. Old/mismatched results must not become current evidence.
+
+End with one label: MEASURED, ARTIFACT_READY, BLOCKED or NO_NEW_EVIDENCE, then the observed result and one next action/owner. If a run ends with only another HOLD report and no new artifact, test, measurement or resolved current-test blocker, say so and change the next action. PRs, commits, wakes, synthetic assertions and copied inventories are not the product scoreboard.
+
