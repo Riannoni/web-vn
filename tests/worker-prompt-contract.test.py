@@ -1,6 +1,6 @@
 """Regression coverage for storytelling-to-Comfy generation boundaries.
 
-Stdlib-only: extract prompt_builder rather than importing GPU runtime modules.
+Stdlib-only: extract the prompt builder and its pure helper, not GPU runtime modules.
 """
 import ast
 import re
@@ -23,9 +23,9 @@ class WorkerPromptContract(unittest.TestCase):
     def setUpClass(cls):
         source=WORKER.read_text()
         tree=ast.parse(source)
-        node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and
-                  n.name=="prompt_builder")
-        module=ast.fix_missing_locations(ast.Module(body=[node],type_ignores=[]))
+        names={"prompt_builder","compact_negative_prompt"}
+        nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names]
+        module=ast.fix_missing_locations(ast.Module(body=nodes,type_ignores=[]))
         namespace={
             "re":re,
             "assert_engine_snapshot":assert_engine_snapshot,
