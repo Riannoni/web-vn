@@ -18,6 +18,10 @@ MAX_B64_CHARS = 4 * ((MAX_PNG_BYTES + 2) // 3)
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
+class _PinnedFaceInvalidMode(ValueError):
+    """A hash-valid PNG whose pixel mode is not an admitted canonical RGB face."""
+
+
 def decode_pinned_face_png(png_base64: str, sha256: str):
     """Return fully decoded 512x512 RGB PIL image from hash-bound graph bytes."""
     if not isinstance(sha256, str) or SHA256.fullmatch(sha256) is None:
@@ -38,10 +42,16 @@ def decode_pinned_face_png(png_base64: str, sha256: str):
         with Image.open(io.BytesIO(raw)) as original:
             if original.format != "PNG" or original.size != (512, 512):
                 raise ValueError("pinned_face_invalid_canvas")
+            if original.mode != "RGB":
+                raise _PinnedFaceInvalidMode("pinned_face_invalid_mode")
             original.verify()
         with Image.open(io.BytesIO(raw)) as original:
+            if original.mode != "RGB":
+                raise _PinnedFaceInvalidMode("pinned_face_invalid_mode")
             original.load()
-            return original.convert("RGB")
+            return original.copy()
+    except _PinnedFaceInvalidMode:
+        raise
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
         raise ValueError("pinned_face_invalid_png_pixels") from exc
 
