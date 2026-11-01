@@ -75,6 +75,31 @@ def terminal_history(data, prompt_id):
     return True
 
 
+def validate_sqlite_state_files(root_fd):
+    """Reject existing SQLite aliases before PRAGMA can change external bytes.
+
+    This guards static symlinks, hardlinks, special files and foreign-owned or
+    non-private state. A hostile writer sharing this UID can still race path
+    replacement after preflight; production requires isolated state ownership.
+    """
+    for name in ("broker.sqlite3", "broker.sqlite3-wal",
+                 "broker.sqlite3-shm", "broker.sqlite3-journal"):
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK |
+                         os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError("unsafe_broker_sqlite_file") from exc
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+                raise ValueError("unsafe_broker_sqlite_file")
+        finally:
+            os.close(fd)
+
+
 class Broker:
     def __init__(self, state_dir, backend, wait_seconds=120, poll_seconds=0.25,
                  backend_timeout=8, lease_seconds=15, max_queue=64,
@@ -97,6 +122,7 @@ class Broker:
             except OSError as exc:
                 raise ValueError("broker_state_dir_symlink_or_unsafe_directory") from exc
             ownership.callback(os.close, root_fd)
+            validate_sqlite_state_files(root_fd)
             os.fchmod(root_fd, 0o700)
             lock_fd = os.open(
                 "broker.lock", os.O_RDWR | os.O_APPEND | os.O_CREAT |
