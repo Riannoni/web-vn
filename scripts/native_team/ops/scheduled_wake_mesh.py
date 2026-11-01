@@ -290,11 +290,11 @@ def acknowledge(root, target, kind, evidence_sha, requestor, receipt_sha, run_id
 def _reported_blockers(text):
     """Conservative text signals, not proof of scope, permission or current health.
 
-    Historical mentions may still need review. Absence of a matched phrase never
-    proves success. Raw/private result prose is not copied into public status.
+    Historical mentions need scoped review, not a stop on unrelated work. Absence
+    of a match never proves success. Raw/private prose is not copied into status.
     """
     patterns = [
-        ("safety_denial", r"blocked by openai.s safety checks|safety[- ]denied|"
+        ("safety_denial", r"\bPLATFORM_DENIAL\b|blocked by openai.s safety checks|safety[- ]denied|"
          r"(?:policy|approval|safety) denial|"
          r"(?:отказ|заблокирован)[^\n.]{0,100}(?:safety|безопасност)"),
         ("unknown_submission", r"(?:unknown|uncertain)[^\n.]{0,35}(?:gpu|submi|dispatch|run_now)|"

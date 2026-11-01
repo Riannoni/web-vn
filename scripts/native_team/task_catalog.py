@@ -13,7 +13,8 @@ def replenish(root, catalog):
     if not (root/"state/team.sqlite3").is_file():
         raise FileNotFoundError("not initialized")
     specs=json.loads(Path(catalog).read_text())
-    if not isinstance(specs,list) or len(specs)>32 or not specs:
+    # An empty approved catalog parks future seeding; existing tasks are untouched.
+    if not isinstance(specs,list) or len(specs)>32:
         raise ValueError("invalid curated catalog")
     ids=[s["id"] for s in specs]
     if len(ids)!=len(set(ids)):

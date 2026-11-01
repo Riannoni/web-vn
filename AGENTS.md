@@ -15,19 +15,29 @@
 
 ## Кто делает следующий результат
 
-- Renderer — приватный storyboard из шести видов: три обычные сцены и три CG; ясные prompts, эмоции, позы, композиция и действительные входы. Не переписывать персонажей под удобный генератор.
-- Identity/Provenance — использовать уже подтверждённые настоящие каноны Миры и Макса Кроу; закрепить их actor IDs, лица, актуальную одежду и ссылки в приватном manifest. Сохранить текущий semireal-стиль; не выбирать персонажа заново. Не изобретать канон и не подставлять случайный face.
-- Pose — необходимые варианты эмоций/поз и понятное взаимодействие для парного CG, с проверкой фактического использования conditioning.
-- GPU Lab — единственный GPU/shared-runtime исполнитель; последовательно создаёт фон, нужные sprites/variants и CG, сохраняет оригиналы/finals и отправляет готовые входы напрямую Golden/Integration.
-- Golden — простой фактический осмотр точных изображений: узнаваемость, одежда, эмоция/поза, состав, взаимодействие и целостность кадра. Golden Evidence — приватный индекс и точные разрешённые входы для осмотра тех же файлов. Метаданные, hashes и VLM-текст сами по себе не доказывают качество pixels.
-- Integration — регулярно доставлять подтверждённые совместимые tested fixes в production напрямую через Lab. Не ждать полного набора, пользовательского показа или ModelLab. E2E — после доставки выполнить один затронутый smoke настоящего game production path, проверить фактическое использование установленного изменения и assets; GPU-действия выполняет Lab.
-- Chief — довести конкретную проверку качества и подтверждённое исправление до production, убрать один реальный блокер. Reliability и остальные роли чинят один конкретный pack blocker или завершают коротко; не создают очередной аудит/benchmark.
+У каждого actionable input один ответственный исполнитель; остальные получают относящийся результат, а не совместное поручение «Renderer/Pose». Использовать действующий manifest/index, не создавать новый tracker.
 
-GPU-работа и независимая CPU-подготовка storyboard, refs, variants и production-доставки могут идти параллельно на разных файлах. Chief/Decision/Dispatcher не являются обязательной последовательной цепочкой разрешений.
+| Роль | Собственный результат и прямой потребитель |
+|---|---|
+| Chief | Следующий разрешённый quality-input, его один owner и фактический handoff; снимает конкретный блокер, не становится approval-hop. |
+| Renderer | Проверяет contract → actual graph/staged inputs; одна причинная правка и frozen input для Lab, reusable source fix для Integration. |
+| GPU Lab | Единственный GPU/shared-runtime owner; проверяет graph, генерирует, лично смотрит каждый output и продолжает bounded repair; pixels → Golden. |
+| Identity | Один доказанный identity/wardrobe/ref дефект; условный input для названного Renderer либо Lab. Уже подтверждённые каноны не пересоздаёт. |
+| Provenance | Только изменившаяся/недостающая source → staged input → graph привязка; delta текущему исполнителю и Golden Evidence. |
+| Pose | Один наблюдаемый pose/contact дефект разрешённого asset; подходящий conditioning для названного исполнителя, без новой подготовки заблокированного CG3. |
+| Golden | Независимый осмотр точных новых pixels/refs; один конкретный дефект текущему repair-owner либо ограниченная фактическая приёмка. |
+| Golden Evidence | Существующий приватный индекс originals/finals/refs/attempts с раздельной атрибуцией producer/operator/Golden; входы производителю и Golden. |
+| Integration | Подтверждённый совместимый reviewed fix и rollback → Lab; installed receipt и затронутый scope → E2E. Не переустанавливает неизменённый здоровый код. |
+| E2E | Реальный smoke затронутого production game-job path после доставки; GPU enqueue выполняет Lab. Browser auth нужен только для затронутого UI. |
+| Reliability | Самый ранний воспроизведённый generation/QA/runtime дефект; не полирует alpha у кадра с лишними людьми/головами/неверным каноном. |
+| Decision | Один действительно конфликтующий input/контракт и один executor; решение по graph не снимает platform denial. |
+| Broker | Только конкретный ownership/execution дефект и минимальный fix для Lab; неизменённый lock не требует часового аудита. |
+| Broker Reviewer | Один ещё нужный independent review точного changed artifact; не дублирует действительный review или optional preview index. |
+| Dispatcher | Продвигает готовый deferred handoff, восстанавливает подтверждённый successor из результата/комментария и сверяет terminal outcome; STARTED не завершает цепочку. |
 
 ## Минимальная проверка качества
 
-Для приватного provisional pack нужны чтение файла, ожидаемые размеры, корректный формат, alpha у sprites и точная привязка actor/background/asset. Затем реальный осмотр pixels и соответствия storyboard/канонам. Не требовать G3, латентностного доказательства, нового QA-исследования или UI-показа перед разрешённым осмотром pixels и подтверждённым исправлением.
+Для приватного provisional pack нужны чтение файла, ожидаемые размеры, корректный формат, alpha у sprites и точная привязка actor/background/asset. Затем реальный осмотр pixels и соответствия storyboard/канонам. Сначала фатальные cast/anatomy/identity/wardrobe/composition дефекты, затем alpha и детали; косметическая правка отвергнутой генерации не становится кандидатом на приёмку. Не требовать G3, латентностного доказательства, нового QA-исследования или UI-показа перед разрешённым осмотром pixels и подтверждённым исправлением.
 
 ModelLab/private preview необязателен и не занимает критический путь. При его использовании непросмотренный диагностический набор показывается только через **уже разрешённый приватный preview** с явным PROVISIONAL / NOT REVIEWED. Это не canonical publish, PASS или G2. Не обходить отказ экспорта под названием preview. Обычный production path сохраняет действующие обязательные QA, admission/version fences и защиту saves/assets; глобально их не отключать. Отсутствие такого preview не создаёт новую UI-задачу и не блокирует разрешённый прямой pixel review или подтверждённую production-доставку.
 
@@ -53,9 +63,13 @@ Lab вправе выполнять ограниченные приватные 
 
 Сначала прочитать текущие AGENTS, [DEVELOPMENT-AND-TESTING](docs/DEVELOPMENT-AND-TESTING.md) и worker contract; неизменённые версии повторно не читать. Затем текущую pack-задачу [issue #20](https://github.com/Riannoni/web-vn/issues/20) и один нужный handoff. Проверять только затронутую среду, не все 15 ролей перед каждым действием.
 
-Integration сохраняет standing authority доставлять относящиеся к набору совместимые tested/merged fixes; Lab активирует их на безопасной границе с backup/rollback и проверкой installed bytes. Не требуется новое разрешение владельца/Chief/Decision, ModelLab, показ владельцу или готовность всего диагностического набора. После — один относящийся smoke настоящего production game path, а не повторный release audit. MERGED, DEPLOYED, PRODUCTION SMOKE CHECKED и VISUALLY REVIEWED различать. Готовность source или успешный deploy — промежуточный результат: оставшийся активный цикл качества продолжается, пока разрешён и укладывается в прежний бюджет.
+Integration сохраняет standing authority доставлять относящиеся к набору совместимые tested/merged fixes; Lab активирует их на безопасной границе с backup/rollback и проверкой installed bytes. Не требуется новое разрешение владельца/Chief/Decision, ModelLab, показ владельцу или готовность всего диагностического набора. После — один относящийся smoke настоящего production game path, а не повторный release audit. Для worker/vision использовать существующий нормально аутентифицированный backend game-job путь через настроенный vn_web.home: Lab выполняет GPU enqueue, E2E связывает installed bytes → job/output → mandatory QA → version-fenced publish либо ожидаемый reject как PRODUCTION_RENDER_SMOKE. Direct diagnostic graph этого не доказывает; browser login/playback нужен только при затронутом UI и иначе остаётся отдельно непроверенным. MERGED, DEPLOYED, PRODUCTION SMOKE CHECKED и VISUALLY REVIEWED различать. Готовность source или успешный deploy — промежуточный результат: оставшийся активный цикл качества продолжается, пока разрешён и укладывается в прежний бюджет.
+
+На входе и перед выходом потребитель разбирает адресованные pending inputs, сохраняет disposition и оставшийся шаг в существующем case record, затем ACK своим настоящим run ID. Любой активный native worker может продвинуть готовый чужой deferred event через existing peek → reserve → один run_now; Dispatcher подхватывает actionable результат/комментарий, если event отсутствует. Один input — один owner; никакой root/chat-gate. Сохраняются 3 wakes/target/hour, cooldown 240s, 45 global/hour, paused/unknown/denial fences и запрет self-wake. Helper/classifier лишь advisory; исторический scoped denial не является глобальным стопом.
 
 Разрешённый SSH-MCP маршрут и recovery — [REMOTE-ACCESS](docs/REMOTE-ACCESS.md). Auth/transport допускают максимум три read-only diagnostics с настоящими ожиданиями 10/30/60 секунд; safety/approval denial не повторять через другого worker/tool/route. Разрешённое чтение публичного source не снимает отказ private-PC операции. Отказ конкретной CG3-операции сохраняется для неё; он не останавливает другие разрешённые assets, source fixes и доставку, не воспроизводящие запрещённый эффект. После восстановления сверить возможные mutations; unknown GPU/run_now не воспроизводить.
+
+Liveness — enabled/current matched run/здоровый сервис — не равен product progress. Старый latest_result другого run не завершает текущий. Не сеять посторонние legacy receipt/shadow-QA/broker audits; не очищать существующие очереди/leases/receipts и не отключать 15 native workers. Роль без релевантного нового input заканчивает NO_NEW_EVIDENCE без нового аудита, файла или wake.
 
 Завершать активный quality-run можно после приёмки конкретного элемента, реально заблокированной операции или достижения существующего ограниченного run/attempt budget. В последних двух случаях сохранить точный следующий input/изменение, причину и owner; при eligible successor использовать существующий официальный wake, без self-loop. GENERATED/hash-only не означает успешную проверку; если осмотр pixels недоступен, указать конкретную недостающую возможность, а не PASS.
 
