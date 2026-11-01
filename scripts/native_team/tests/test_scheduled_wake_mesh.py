@@ -212,6 +212,97 @@ class NativeWakeMeshTests(unittest.TestCase):
         self.assertIsNone(pending[S2]["delivery"])
         self.assertTrue(self.call(sha=S2,now=340)["reserved"])
 
+    def test_dispatch_candidates_surface_new_input_behind_historical_attempts(self):
+        for i in range(205):
+            sha = f"{i + 1:040x}"
+            token = m.check(self.root, "chief", "source_pr_ready", sha,
+                            "operator", reserve=True, now=100 + i * 4000)["reservation_id"]
+            m.record_outcome(self.root, "chief", "source_pr_ready", sha, "operator",
+                             token, "completed", RECEIPT, run_id=RUN_ID,
+                             now=101 + i * 4000)
+        fresh = "f" * 40
+        m.defer(self.root, "chief", "source_pr_ready", fresh,
+                "renderer", now=900000)
+        page = m.status(self.root)
+        self.assertEqual(len(page["pending"]), 200)
+        self.assertEqual(page["pending_total"], 206)
+        self.assertTrue(page["truncated"])
+        self.assertNotIn(fresh, [x["evidence_sha"] for x in page["pending"]])
+        self.assertEqual([x["evidence_sha"] for x in page["dispatch_candidates"]], [fresh])
+        self.assertIsNone(page["dispatch_candidates"][0]["delivery"])
+        self.assertFalse(page["automations_invoked"])
+        newest = []
+        for i in range(25):
+            sha = f"{1000 + i:040x}"
+            m.defer(self.root, "chief", "source_pr_ready", sha,
+                    "renderer", now=900001 + i)
+            newest.append(sha)
+        page = m.status(self.root)
+        self.assertEqual(len(page["dispatch_candidates"]), 20)
+        self.assertEqual([x["evidence_sha"] for x in page["dispatch_candidates"]],
+                         list(reversed(newest[-20:])))
+
+    def test_dispatch_candidates_exclude_fenced_latest_outcomes_without_mutation(self):
+        outcomes = ("reserved", "requested", "started", "completed", "unknown",
+                    "blocked", "not_dispatched")
+        shas = {}
+        for i, outcome in enumerate(outcomes):
+            sha = f"{100 + i:040x}"
+            shas[outcome] = sha
+            token = m.check(self.root, "chief", "source_pr_ready", sha,
+                            "operator", reserve=True, now=100 + i * 4000)["reservation_id"]
+            if outcome != "reserved":
+                m.record_outcome(self.root, "chief", "source_pr_ready", sha, "operator",
+                                 token, outcome, RECEIPT,
+                                 run_id=RUN_ID if outcome in {"started", "completed"} else None,
+                                 now=101 + i * 4000)
+        none, consumed = "d" * 40, "e" * 40
+        for sha in (none, consumed):
+            m.defer(self.root, "chief", "source_pr_ready", sha, "renderer", now=30000)
+        m.acknowledge(self.root, "chief", "source_pr_ready", consumed,
+                      "chief", RECEIPT, RUN_ID, now=30001)
+        dbp = self.root / "state/scheduled-wake-history.sqlite3"
+        def snapshot():
+            with sqlite3.connect(dbp) as db:
+                return tuple(tuple(db.execute("SELECT * FROM " + table + " ORDER BY rowid"))
+                             for table in ("pending_signal", "wake_attempt", "wake_outcome",
+                                           "wake_signal", "run_observation"))
+        before = snapshot()
+        for _ in range(2):
+            page = m.status(self.root)
+            self.assertEqual({x["evidence_sha"] for x in page["dispatch_candidates"]},
+                             {none, shas["not_dispatched"]})
+            self.assertTrue(all("eligible" not in x for x in page["dispatch_candidates"]))
+            self.assertFalse(page["automations_invoked"])
+        self.assertEqual(snapshot(), before)
+        # An older not_dispatched attempt cannot hide the new reserved attempt.
+        m.check(self.root, "chief", "source_pr_ready", shas["not_dispatched"],
+                "dispatcher", reserve=True, now=40000)
+        self.assertEqual([x["evidence_sha"] for x in m.status(self.root)["dispatch_candidates"]],
+                         [none])
+
+    def test_dispatch_candidates_share_target_and_cursor_high_water(self):
+        old = []
+        for i in range(3):
+            sha = f"{200 + i:040x}"
+            old.append(sha)
+            m.defer(self.root, "chief", "source_pr_ready", sha,
+                    "renderer", now=100 + i)
+        m.defer(self.root, "renderer", "source_pr_ready", "d" * 40,
+                "chief", now=500)
+        first = m.status(self.root, target="chief", limit=1)
+        self.assertEqual([x["evidence_sha"] for x in first["dispatch_candidates"]],
+                         list(reversed(old)))
+        newcomer = "e" * 40
+        m.defer(self.root, "chief", "source_pr_ready", newcomer,
+                "renderer", now=101.5)
+        later = m.status(self.root, target="chief", limit=1, cursor=first["next_cursor"])
+        self.assertEqual([x["evidence_sha"] for x in later["dispatch_candidates"]],
+                         list(reversed(old)))
+        self.assertEqual(later["pending"][0]["evidence_sha"], old[1])
+        self.assertIn(newcomer, [x["evidence_sha"] for x in
+                               m.status(self.root, target="chief")["dispatch_candidates"]])
+
     def test_authorized_setup_operator_is_not_a_fictitious_scheduled_worker(self):
         result=m.check(self.root,"identity","source_pr_ready",S1,"operator",True,100)
         self.assertTrue(result["reserved"])
