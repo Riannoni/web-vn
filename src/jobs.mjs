@@ -1,10 +1,13 @@
 import fs from "node:fs/promises";
+import {constants as fsConstants} from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import {PNG} from "pngjs";
 import {dataRoot,attachImage,gameGet,storeCharacterVariant,storeBackgroundVariant} from "./game-store.mjs";
 import {artSnapshot,currentSceneMatches,assetName} from "./art-spec.mjs";
+import {deriveNarrativeSourceProvenance,verifyNarrativeSourceProvenance} from "./source-canonical-provenance.mjs";
 import {sceneKey} from "./scene-cache.mjs";
+import {sceneIntentFingerprint} from "./visual-state.mjs";
 import {claimAttempt,recordStage,finishAttempt,aggregateTimings} from "./job-timing.mjs";
 import {pushGameEvent} from "./live-events.mjs";
 import {isLocalGpuReserved} from "./gpu-coordinator.mjs";
@@ -31,6 +34,95 @@ const styles={anime:"waiIllustriousSDXL_v170.safetensors",
  realistic:"CyberRealisticPony_V18.0_F16.safetensors",
  poster:"CyberRealisticPony_V18.0_F16.safetensors",
  animation:"BASNSFWBetterAnimeStyleForNSFWHentai_baseV10.safetensors"};
+// Creation preflight only: R-10 still owns the immutable SHA256/HMAC receipt.
+// Do not mistake URL/filename presence for accessible canonical source bytes.
+async function requireCanonicalSourceBytes(name,role){
+ if(!/^[a-f0-9-]{36}\.(png|jpg|webp)$/i.test(name))
+  throw Error("Canonical "+role+" source asset name invalid");
+ const handle=await fs.open(path.join(dataRoot,"assets",name),
+  fsConstants.O_RDONLY|fsConstants.O_NOFOLLOW);
+ try{
+  const stat=await handle.stat();
+  if(!stat.isFile()||stat.size<1||stat.size>64*1024*1024)
+   throw Error("Canonical "+role+" source asset bytes invalid");
+  const bytes=await handle.readFile();
+  if(bytes.length!==stat.size)
+   throw Error("Canonical "+role+" source asset bytes changed during preflight");
+  return crypto.createHash("sha256").update(bytes).digest("hex");
+ }finally{await handle.close()}
+}
+// This receipt is issued at the real queued-job creation boundary. It binds
+// existing producer inputs, NOT a future Comfy graph, prompt ID, PNG or G2.
+const sha256=x=>crypto.createHash("sha256").update(x).digest("hex");
+const digestPattern=/^[0-9a-f]{64}$/;
+const signingKey=()=>{
+ const value=process.env.VN_CREATION_RECEIPT_HMAC_KEY;
+ if(typeof value!=="string"||!digestPattern.test(value))
+  throw Error("Creation receipt signing key unavailable (64 lowercase hex chars required)");
+ return Buffer.from(value,"hex");
+};
+const signReceipt=(payload,key)=>crypto.createHmac("sha256",key)
+ .update(JSON.stringify(payload)).digest("hex");
+const sourceAssetDigest=name=>requireCanonicalSourceBytes(name,"creation receipt");
+async function receiptPayload(j,expectedVersion){
+ if(j.kind!=="scene"||j.spec?.composition!=="neural_story")
+  throw Error("Creation receipt only supports neural scene jobs");
+ if(!/^[a-zA-Z0-9_-]{1,100}$/.test(j.game_id))
+  throw Error("Creation receipt game ID invalid");
+ const raw=await fs.readFile(path.join(dataRoot,"games",j.game_id+".json"));
+ const game=JSON.parse(raw),scene=game.scene;
+ const revision=scene?.cg_revision??0;
+ if(game.id!==j.game_id||!Number.isSafeInteger(game.version)||
+    game.version<1||game.version!==expectedVersion||
+    !Number.isSafeInteger(revision)||revision<0||
+    !scene||sceneIntentFingerprint(scene)!==j.spec.cg_basis_snapshot||
+    assetName(scene.background_url)!==j.spec.background_asset||
+    scene.location!==j.spec.expected_location)
+  throw Error("Creation receipt scene/save version mismatch");
+ if(!j.spec.visual_contract||typeof j.spec.visual_contract!=="object"||
+    !Array.isArray(j.spec.characters)||j.spec.characters.length===0)
+  throw Error("Creation receipt typed scene contract missing");
+ verifyNarrativeSourceProvenance(game,j.spec);
+ // Signed creation material must come from the current, committed narrator
+ // turn. A caller-controlled or legacy fallback prompt is not source truth.
+ if(j.spec.source_provenance_v1?.narrative_origin!=="canonical_narration_and_scene_cg_prompt")
+  throw Error("Creation receipt canonical narrator action/prompt origin not verified");
+ const assets=[{role:"background",asset:j.spec.background_asset}];
+ for(const actor of j.spec.characters){
+  if(!actor.name||(!actor.anchor_asset&&!actor.anchor_face_asset))
+   throw Error("Creation receipt actor anchor missing");
+  if(actor.anchor_asset)assets.push({role:"actor_anchor",actor:actor.name,asset:actor.anchor_asset});
+  if(actor.anchor_face_asset)assets.push({role:"actor_face",actor:actor.name,asset:actor.anchor_face_asset});
+ }
+ for(const asset of assets)asset.sha256=await sourceAssetDigest(asset.asset);
+ return {schema:"web_vn_creation_receipt_v1",producer:"src/jobs.mjs:enqueue",
+  job_id:j.id,game_id:j.game_id,job_kind:j.kind,job_style:j.style,
+  job_character:j.character,game_version:game.version,
+  scene_revision:revision,issued_at:j.created_at,
+  save_snapshot_sha256:sha256(raw),
+  scene_snapshot_sha256:sha256(JSON.stringify(scene)),
+  scene_fingerprint_sha256:sha256(j.spec.cg_basis_snapshot),
+  visual_contract_sha256:sha256(JSON.stringify(j.spec.visual_contract)),
+  spec_sha256:sha256(JSON.stringify(j.spec)),
+  prompt_sha256:sha256(j.prompt),model_sha256:sha256(j.model),
+  source_assets:assets,graph_sha256:null,comfy_prompt_id:null,
+  result_sha256:null,output_binding:"pending_not_verified"};
+}
+export async function verifyCreationReceipt(j){
+ const receipt=j?.creation_receipt_v1;
+ if(!receipt||typeof receipt!=="object")
+  throw Error("Creation receipt missing");
+ const {signature,...payload}=receipt;
+ if(typeof signature!=="string"||!digestPattern.test(signature))
+  throw Error("Creation receipt signature invalid");
+ const expected=signReceipt(payload,signingKey());
+ if(!crypto.timingSafeEqual(Buffer.from(signature,"hex"),Buffer.from(expected,"hex")))
+  throw Error("Creation receipt signature mismatch");
+ const current=await receiptPayload(j,receipt.game_version);
+ if(JSON.stringify(current)!==JSON.stringify(payload))
+  throw Error("Creation receipt source asset/scene/save mismatch");
+ return {verified:true,scope:"creation_source_only",g2:"UNVERIFIED",g3:"NO_GO"};
+}
 export function styleList(){return Object.keys(styles)}
 export async function enqueue({game_id,prompt,kind="background",style,character="",
  quality="standard",force=false,outfit,pose,emotion,priority,preview_only=false,library_only=false,
@@ -80,10 +172,46 @@ export async function enqueue({game_id,prompt,kind="background",style,character=
   if(kind==="local_cg"&&!local_visual_state?.characters?.length)
    throw Error("Local CG requires characters in the local visual state");
  }
+ const canonicalSourceFingerprints=[];
+ const preflightSource=async(name,role)=>{
+  canonicalSourceFingerprints.push({name,role,
+   sha256:await requireCanonicalSourceBytes(name,role)});
+ };
+ // Only the real canonical game enqueue may issue this source record.
+ // R-10 must HMAC-sign the resulting complete spec *after* this preflight;
+ // R-11 separately binds the Comfy graph/prompt/original PNG.
+  if(kind==="scene"&&spec.composition==="neural_story"){
+   spec.source_provenance_v1=deriveNarrativeSourceProvenance(game,spec);
+   // Existence is mandatory before queue mutation, but the R-10 receipt
+   // must later sign the full saved spec and byte digests under the queue lock.
+   await preflightSource(spec.background_asset,"background plate");
+   for(const actor of spec.source_provenance_v1.canonical_actors){
+    await preflightSource(actor.face_asset,"face");
+    if(actor.body_asset)await preflightSource(actor.body_asset,"body");
+   }
+  }
+ const needsReceipt=kind==="scene"&&spec.composition==="neural_story";
+ // Fail before any queue state changes: unsigned neural source is never accepted.
+ if(needsReceipt)signingKey();
  const defaultPriority={background:90,sprite:80,scene:50,video:20,local_cg:65};
  const prio=priority===undefined?defaultPriority[kind]:Number(priority);
  if(!Number.isFinite(prio)||prio<0||prio>100)throw Error("Priority must be 0..100");
  return exclusive(async()=>{
+  // File-byte preflight awaits IO: the underlying canonical save may change
+  // between the first gameGet and this job-queue lock. Reject a stale
+  // narrator/scene/actor snapshot before any queued-job mutation. R-10 must
+  // separately sign the actual source bytes at creation; this is not HMAC.
+  if(kind==="scene"&&spec.composition==="neural_story"){
+   verifyNarrativeSourceProvenance(await gameGet(game_id),spec);
+   // Recheck every byte hash under the queue lock: an asset can be swapped
+   // without changing its URL or the save version during async preflight.
+   // R-10 must still sign these trusted bytes at creation for immutable proof.
+   for(const {name,role,sha256} of canonicalSourceFingerprints){
+    if(await requireCanonicalSourceBytes(name,role)!==sha256)
+     throw Error("Canonical "+role+" source bytes changed before enqueue");
+   }
+   verifyNarrativeSourceProvenance(await gameGet(game_id),spec);
+  }
   // Explicit exact-variant reuse, while a manual regenerate (force=true) bypasses cache.
   const id=game.identities?.[character];
   const key=[style,spec.variant.outfit,spec.variant.pose,spec.variant.emotion].join("|");
@@ -116,7 +244,10 @@ export async function enqueue({game_id,prompt,kind="background",style,character=
     spec.expected_location,spec.target_time_of_day,spec.target_weather,
     spec.background_asset,spec.expected_variant_key,prompt.trim()]);
   const identical=existing.find(j=>sameTarget(j)&&fingerprint(j)===requestFingerprint);
-  if(identical)return {...identical,deduplicated:true};
+  if(identical){
+   if(needsReceipt)await verifyCreationReceipt(identical);
+   return {...identical,deduplicated:true};
+  }
   // Automatic neural CG is keyed to its immutable story-shot fingerprint.
   // Do not let secondary request metadata changes supersede an identical
   // queued/working frame. Otherwise a 4s UI poll can starve the GPU forever.
@@ -128,7 +259,28 @@ export async function enqueue({game_id,prompt,kind="background",style,character=
      j.spec?.expected_location===spec.expected_location&&
      j.spec?.background_asset===spec.background_asset&&
      !j.superseded_by);
-   if(pending)return {...pending,deduplicated:true};
+   if(pending){
+    if(needsReceipt)await verifyCreationReceipt(pending);
+    return {...pending,deduplicated:true};
+   }
+  }
+  // Build the creation receipt BEFORE superseding any queued job. Missing
+  // plates, stale save versions and missing keys must have no side effects.
+  if(kind==="scene"&&existing.some(j=>j.game_id===game_id&&
+     ["background","sprite"].includes(j.kind)&&
+     ["queued","working"].includes(j.status)&&!j.superseded_by))
+   throw Error("Wait until the active background and sprites finish before composing CG.");
+  const j={id:crypto.randomUUID(),game_id,kind,style,character:String(character).slice(0,100),
+   prompt:prompt.trim(),model:styles[style],spec,quality_status:"waiting",
+   status:"queued",priority:prio,progress:0,attempts:0,created_at:new Date().toISOString(),
+   timings:{},attempt_history:[],stage:"queued"};
+  if(needsReceipt)j.creation_receipt_v1={
+   ...await receiptPayload(j,game.version),
+   signature:"" // Replaced below with a signature over immutable producer inputs.
+  };
+  if(needsReceipt){
+   const {signature,...payload}=j.creation_receipt_v1;
+   j.creation_receipt_v1.signature=signReceipt(payload,signingKey());
   }
   // A new intent supersedes queued work for this target. Running GPU work may
   // finish physically, but its result will never be attached to the game.
@@ -142,15 +294,6 @@ export async function enqueue({game_id,prompt,kind="background",style,character=
     }
     await save(stale);
   }
-  if(kind==="scene"){
-    if(existing.some(j=>j.game_id===game_id&&["background","sprite"].includes(j.kind)&&
-       ["queued","working"].includes(j.status)&&!j.superseded_by))
-      throw Error("Wait until the active background and sprites finish before composing CG.");
-  }
-  const j={id:crypto.randomUUID(),game_id,kind,style,character:String(character).slice(0,100),
-   prompt:prompt.trim(),model:styles[style],spec,quality_status:"waiting",
-   status:"queued",priority:prio,progress:0,attempts:0,created_at:new Date().toISOString(),
-   timings:{},attempt_history:[],stage:"queued"};
   await save(j);return j;
  });
 }
@@ -266,6 +409,16 @@ export async function nextJob(pool="any"){
         j.finished_at=new Date().toISOString();await save(j);continue;
       }
       j.spec.local_sprite_assets=sources.map(x=>x.file);
+    }
+    // A signed-but-stale, forged or missing source must never reach the worker.
+    if(j.kind==="scene"&&j.spec?.composition==="neural_story"){
+      try{await verifyCreationReceipt(j)}
+      catch{
+        j.status="failed";j.stage="failed";
+        j.error="Creation-time producer receipt missing, invalid or stale";
+        j.finished_at=new Date().toISOString();
+        await save(j);continue;
+      }
     }
     let valid=false;
     try{
@@ -397,6 +550,8 @@ export async function completeJob(id,bytes,mime,baseUrl){
   const j=await read(id);
   if(j.status!=="working")throw Error("Job is not in progress");
   if(j.superseded_by)throw Error("Art job superseded by newer request");
+  if(j.kind==="scene"&&j.spec?.composition==="neural_story")
+   await verifyCreationReceipt(j);
   if(j.spec?.spec_version>=4&&!j.qa?.passed)throw Error("Quality report required before publishing");
   const ext={"image/png":"png","image/jpeg":"jpg","image/webp":"webp","video/mp4":"mp4"}[mime];
   if(!ext)throw Error("Unsupported media type");

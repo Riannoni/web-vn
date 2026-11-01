@@ -5,11 +5,20 @@ This NEVER calls OpenAI or a model. Each caller MUST first verify a genuinely
 new exact source/PNG SHA, check official Automations.peek that the target is
 enabled and not in_progress, and only then reserve + issue ONE official run_now.
 The platform decides actual availability and rate limits. No Codex quota read.
+
+Read-only inspection: --status [--target ROLE] [--limit 1..200]
+  [--cursor NEXT_CURSOR]. Cursor fixes an initial rowid high-water; pages use a
+  deterministic keyset, so earlier ACKs do not skip entries. New arrivals are
+  intentionally excluded until a fresh --status call without --cursor.
+  Status/selection does not acknowledge, dispatch or alter wake outcomes.
 """
 import argparse
+import base64
+import binascii
 from contextlib import contextmanager
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -268,17 +277,105 @@ def acknowledge(root, target, kind, evidence_sha, requestor, receipt_sha, run_id
     return {"acknowledged": True, "target": target, "evidence_sha": evidence_sha}
 
 
-def status(root):
-    """Bounded recovery inventory; a completed cloud run can still owe consumption."""
+STATUS_MAX_PAGE = 200
+
+
+def _status_cursor(payload):
+    """Canonical opaque keyset position, not a cloud delivery authorization."""
+    data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _parse_status_cursor(cursor, target, limit):
+    if not isinstance(cursor, str) or not 8 <= len(cursor) <= 1024:
+        raise ValueError("malformed status cursor")
+    try:
+        raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4),
+                               altchars=b"-_", validate=True)
+        data = json.loads(raw)
+    except (ValueError, UnicodeError, binascii.Error) as exc:
+        raise ValueError("malformed status cursor") from exc
+    if not isinstance(data, dict) or set(data) != {
+        "v", "target", "limit", "high_water", "after"
+    } or _status_cursor(data) != cursor:
+        raise ValueError("malformed status cursor")
+    if (type(data["v"]) is not int or data["v"] != 1
+        or data["target"] != target or type(data["limit"]) is not int
+        or data["limit"] != limit):
+        raise ValueError("incompatible status cursor filter or limit")
+    high_water = data["high_water"]
+    after = data["after"]
+    if (type(high_water) is not int or not 0 <= high_water < 2**63
+        or not isinstance(after, list) or len(after) != 4
+        or type(after[0]) not in (int, float)
+        or not math.isfinite(after[0]) or after[0] < 0
+        or not isinstance(after[1], str) or after[1] not in TARGETS
+        or not isinstance(after[2], str) or after[2] not in KINDS
+        or not isinstance(after[3], str) or not SHA.fullmatch(after[3])):
+        raise ValueError("malformed status cursor values")
+    return high_water, after
+
+
+def status(root, target=None, limit=STATUS_MAX_PAGE, cursor=None):
+    """Read-only lifecycle inventory: target-filtered, stable keyset pages.
+
+    Initial page freezes the maximum SQLite rowid. Later new arrivals are not
+    included even when their created_at is backdated; restart without a cursor
+    for a fresh scan. Consumption/ACK of an earlier page never shifts offsets.
+    All existing no-filter response fields keep their original meaning.
+    """
+    if target is not None and target not in TARGETS:
+        raise ValueError("unknown status target")
+    if type(limit) is not int or not 1 <= limit <= STATUS_MAX_PAGE:
+        raise ValueError("invalid status page size")
+    decoded = _parse_status_cursor(cursor, target, limit) if cursor is not None else None
     with _database(root) as db:
-        total = db.execute("SELECT COUNT(*) FROM pending_signal WHERE consumed_at IS NULL").fetchone()[0]
-        pending = [dict(r) for r in db.execute(
-            "SELECT * FROM pending_signal WHERE consumed_at IS NULL ORDER BY created_at LIMIT 200")]
-        for event in pending:
-            attempt = _latest(db, (event["target"], event["event_kind"], event["evidence_sha"]))
-            event["delivery"] = dict(attempt) if attempt else None
-    return {"pending": pending, "pending_total": total, "truncated": total > len(pending),
-            "automations_invoked": False}
+        db.execute("BEGIN")
+        try:
+            global_total = db.execute(
+                "SELECT COUNT(*) FROM pending_signal WHERE consumed_at IS NULL").fetchone()[0]
+            if target is None:
+                filtered_total = global_total
+            else:
+                filtered_total = db.execute(
+                    "SELECT COUNT(*) FROM pending_signal "
+                    "WHERE consumed_at IS NULL AND target=?", (target,)).fetchone()[0]
+            high_water = decoded[0] if decoded else (
+                db.execute("SELECT COALESCE(MAX(rowid),0) FROM pending_signal").fetchone()[0])
+            conditions = ["consumed_at IS NULL", "rowid <= ?"]
+            params = [high_water]
+            if target is not None:
+                conditions.append("target = ?")
+                params.append(target)
+            if decoded is not None:
+                conditions.append("(created_at,target,event_kind,evidence_sha) > (?,?,?,?)")
+                params.extend(decoded[1])
+            rows = db.execute(
+                "SELECT * FROM pending_signal WHERE " + " AND ".join(conditions) +
+                " ORDER BY created_at,target,event_kind,evidence_sha LIMIT ?",
+                (*params, limit+1)).fetchall()
+            has_more = len(rows) > limit
+            pending = [dict(row) for row in rows[:limit]]
+            for event in pending:
+                attempt = _latest(db, (event["target"], event["event_kind"], event["evidence_sha"]))
+                event["delivery"] = dict(attempt) if attempt else None
+            next_cursor = None
+            if has_more:
+                last = pending[-1]
+                next_cursor = _status_cursor({
+                    "v": 1, "target": target, "limit": limit,
+                    "high_water": high_water,
+                    "after": [last["created_at"], last["target"],
+                              last["event_kind"], last["evidence_sha"]]
+                })
+            db.execute("COMMIT")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+    return {"pending": pending, "pending_total": global_total,
+            "filtered_total": filtered_total, "global_total": global_total,
+            "truncated": has_more, "next_cursor": next_cursor,
+            "page_limit": limit, "automations_invoked": False}
 
 
 def main():
@@ -298,10 +395,17 @@ def main():
     p.add_argument("--reservation-id")
     p.add_argument("--receipt-sha")
     p.add_argument("--run-id")
+    p.add_argument("--limit", type=int, default=STATUS_MAX_PAGE,
+                   help="status page size, 1..200")
+    p.add_argument("--cursor",
+                   help="opaque next_cursor from preceding status page")
     args = p.parse_args()
     if args.status:
-        result = status(args.root)
+        result = status(args.root, target=args.target,
+                        limit=args.limit, cursor=args.cursor)
     else:
+        if args.cursor is not None or args.limit != STATUS_MAX_PAGE:
+            p.error("--limit and --cursor are status-only")
         if not all((args.target,args.event_kind,args.evidence_sha,args.requestor)):
             p.error("target, event-kind, evidence-sha and requestor are required")
         common = (args.root,args.target,args.event_kind,args.evidence_sha,args.requestor)

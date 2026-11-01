@@ -129,6 +129,12 @@ def score_action_contrast(image,spec,embedding=None):
 
 def analyze(kind,image,spec,quality,identity_ref=None,candidate_face=None):
  t0=time.monotonic()
+ vlm_caption_ms=0.0
+ def timed_caption(*args,**kwargs):
+  nonlocal vlm_caption_ms
+  caption_t0=time.monotonic()
+  try:return summarize(*args,**kwargs)
+  finally:vlm_caption_ms+=(time.monotonic()-caption_t0)*1000
  env=spec.get("environment") or {}
  expected=env.get("id","unclassified")
  probs={}
@@ -220,11 +226,11 @@ def analyze(kind,image,spec,quality,identity_ref=None,candidate_face=None):
    prompts["sprite"]=("Describe factually whether the clearly adult person wears any garments "
      "or accessories. Name visible items of clothing, or say 'no clothes visible' if none. "
      "Avoid assumptions. Answer in one brief sentence.")
-  caption=summarize(image,prompts.get(kind,prompts["background"]))
+  caption=timed_caption(image,prompts.get(kind,prompts["background"]))
   if neural_story and insufficient_scene_caption(caption):
    # SmolVLM2 occasionally returned only "Two.". Re-prompt with
    # descriptive captioning instead of a pure counting question.
-   alt=summarize(image,
+   alt=timed_caption(image,
      "Start with 'The image shows'. Describe the entire picture in two "
      "full English sentences including foreground subjects, their positions, "
      "physical objects and background. Do not answer with a count alone.")
@@ -245,7 +251,7 @@ def analyze(kind,image,spec,quality,identity_ref=None,candidate_face=None):
    # This avoids an extra CPU VLM pass for already-readable contact.
    generic_verified=check_wall_action(caption,spec)[0] is True
    scene_action_observation=(caption if generic_verified else
-                             summarize(image,action_prompt,max_new_tokens=92))
+                             timed_caption(image,action_prompt,max_new_tokens=92))
    scene_action_verified,pose_reasons,scene_action_evidence=check_wall_action(
        scene_action_observation,spec)
    if scene_action_evidence.get("ground_pose") is True:
@@ -330,7 +336,23 @@ def analyze(kind,image,spec,quality,identity_ref=None,candidate_face=None):
    "scene_action_verified":scene_action_verified,
    "scene_action_observation":scene_action_observation[:420],
    "scene_action_evidence":scene_action_evidence,
-   "duration_seconds":round(time.monotonic()-t0,2)}
+   "duration_seconds":round(time.monotonic()-t0,2),
+   "vlm_caption_ms":round(max(0,vlm_caption_ms),3)}
+
+def timed_analyze(kind,image,spec,quality,reference,candidate):
+ """Paired monotonic spans; CPU model analysis never hides lock contention."""
+ lock_requested=time.monotonic()
+ with lock:
+  lock_acquired=time.monotonic()
+  result=analyze(kind,image,spec,quality,reference,candidate)
+  analyzed_at=time.monotonic()
+ if not isinstance(result,dict):
+  raise TypeError("Vision analyzer response must be a mapping")
+ result["qa_stage_ms"]={
+  "lock_wait":round(max(0,(lock_acquired-lock_requested)*1000),3),
+  "model_analyze":round(max(0,(analyzed_at-lock_acquired)*1000),3)}
+ return result
+
 
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args):return
@@ -342,6 +364,7 @@ class Handler(BaseHTTPRequestHandler):
   if self.path!="/judge":
    self.send_error(404);return
   try:
+   handler_t0=time.monotonic()
    n=int(self.headers.get("Content-Length","0"))
    if n<1 or n>14*1024*1024:raise ValueError("Invalid request size")
    data=json.loads(self.rfile.read(n))
@@ -351,9 +374,13 @@ class Handler(BaseHTTPRequestHandler):
    if data.get("identity_b64") and data.get("candidate_face_b64"):
     reference=Image.open(io.BytesIO(base64.b64decode(data["identity_b64"],validate=True))).convert("RGB")
     candidate=Image.open(io.BytesIO(base64.b64decode(data["candidate_face_b64"],validate=True))).convert("RGB")
-   with lock:
-    response=analyze(data.get("kind","background"),img,data.get("spec") or {},
-                     data.get("quality","standard"),reference,candidate)
+   decoded_at=time.monotonic()
+   response=timed_analyze(data.get("kind","background"),img,data.get("spec") or {},
+                          data.get("quality","standard"),reference,candidate)
+   response["qa_stage_ms"]["input_decode"]=round(
+       max(0,(decoded_at-handler_t0)*1000),3)
+   response["qa_stage_ms"]["handler_before_send"]=round(
+       max(0,(time.monotonic()-handler_t0)*1000),3)
    self.response(200,response)
   except Exception as error:
    self.response(200,{"status":"unavailable","reason":str(error)[:240]})

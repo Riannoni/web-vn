@@ -104,6 +104,22 @@ class IdentityWardrobePreflight(unittest.TestCase):
             "outfit":"closed navy jacket","sha256":"c"*64})["status"],
             "SOURCE_INTENT_CONSISTENT_NOT_G2")
 
+    def test_rejects_non_string_wardrobe_claims_for_sprite_and_cg(self):
+        # Exact typed current outfit cannot be an object/list/boolean/number.
+        # An identical malformed claim in source and typed CG is not valid
+        # provenance, even though str(value) can produce matching strings.
+        for malformed in (["closed navy jacket"], {"garment": "navy jacket"}, True, 42):
+            sprite={"kind":"sprite","character":"Actor_A","spec":{
+                "character":"Actor_A","face_asset":FACE_A,
+                "variant":{"outfit":malformed}}}
+            with self.subTest(kind="sprite", value=repr(malformed)):
+                with self.assertRaisesRegex(ContractBlocked, "outfit|Outfit|wardrobe"):
+                    checked(sprite)
+            cg=scene([actor(outfit=malformed)])
+            with self.subTest(kind="scene", value=repr(malformed)):
+                with self.assertRaisesRegex(ContractBlocked, "outfit|Outfit|wardrobe"):
+                    checked(cg)
+
     def test_lost_scene_contract_rejected(self):
         j=scene()
         del j["spec"]["visual_contract"]
