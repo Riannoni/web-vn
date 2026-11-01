@@ -1,0 +1,25 @@
+--- PR140/worker/vision_daemon.py
++++ private-container/vision_daemon.py
+@@ -62,8 +62,8 @@
+  ("group_many","a photo of a group of four or more adults")
+ ]
+ print("VLM_DAEMON loading CLIP",flush=True)
+-clip_processor=CLIPProcessor.from_pretrained(CLIP_ID)
+-clip=CLIPModel.from_pretrained(CLIP_ID).eval()
++clip_processor=CLIPProcessor.from_pretrained(CLIP_ID,revision=os.environ["VN_CLIP_REVISION"],local_files_only=True)
++clip=CLIPModel.from_pretrained(CLIP_ID,revision=os.environ["VN_CLIP_REVISION"],local_files_only=True).eval()
+ with torch.inference_mode():
+  text_inputs=clip_processor(text=[v for _,v in LABELS],return_tensors="pt",padding=True)
+  text_feats=clip.get_text_features(**text_inputs)
+@@ -85,9 +85,9 @@
+  if hasattr(count_feats,"pooler_output"):count_feats=count_feats.pooler_output
+  count_feats=torch.nn.functional.normalize(count_feats,dim=-1)
+ print("VLM_DAEMON loading SmolVLM",flush=True)
+-vlm_processor=AutoProcessor.from_pretrained(VLM_ID)
++vlm_processor=AutoProcessor.from_pretrained(VLM_ID,revision=os.environ["VN_VLM_REVISION"],local_files_only=True)
+ vlm=AutoModelForImageTextToText.from_pretrained(
+- VLM_ID,dtype=torch.float32,attn_implementation="eager").eval()
++ VLM_ID,revision=os.environ["VN_VLM_REVISION"],local_files_only=True,torch_dtype=torch.float32,attn_implementation="eager").eval()
+ if VLM_DEVICE=="cuda":
+  vlm=vlm.to("cuda")
+ print("VLM_DAEMON ready port",PORT,flush=True)
