@@ -1,7 +1,8 @@
-"""CPU-first, content-embedded Comfy face input. Source-only until Lab installs.
+"""SHA-only Comfy face input backed by a private content-addressed store.
 
-The graph carries the actual PNG bytes, not a mutable LoadImage filename.
-This is transport integrity, NOT canonical source-origin authentication or G2.
+Comfy prompt/history carries only SHA-256, never base64 face bytes or a path.
+Requires a private out-of-band store mount configured by GPU Lab; source
+transport integrity is NOT canonical origin authentication or G2.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import io
 import re
 
 from PIL import Image, ImageFile
+from .sha_store import read_pinned_store
 
 MAX_PNG_BYTES = 12_000_000
 MAX_B64_CHARS = 4 * ((MAX_PNG_BYTES + 2) // 3)
@@ -22,17 +24,10 @@ class _PinnedFaceInvalidMode(ValueError):
     """A hash-valid PNG whose pixel mode is not an admitted canonical RGB face."""
 
 
-def decode_pinned_face_png(png_base64: str, sha256: str):
-    """Return fully decoded 512x512 RGB PIL image from hash-bound graph bytes."""
+def _decode_pinned_face_bytes(raw: bytes, sha256: str):
     if not isinstance(sha256, str) or SHA256.fullmatch(sha256) is None:
         raise ValueError("pinned_face_invalid_sha")
-    if not isinstance(png_base64, str) or len(png_base64) > MAX_B64_CHARS:
-        raise ValueError("pinned_face_invalid_transport_size")
-    try:
-        raw = base64.b64decode(png_base64, validate=True)
-    except (ValueError, binascii.Error) as exc:
-        raise ValueError("pinned_face_invalid_base64") from exc
-    if not raw or len(raw) > MAX_PNG_BYTES:
+    if not isinstance(raw, bytes) or not raw or len(raw) > MAX_PNG_BYTES:
         raise ValueError("pinned_face_invalid_transport_size")
     if hashlib.sha256(raw).hexdigest() != sha256:
         raise ValueError("pinned_face_sha_mismatch")
@@ -56,6 +51,22 @@ def decode_pinned_face_png(png_base64: str, sha256: str):
         raise ValueError("pinned_face_invalid_png_pixels") from exc
 
 
+def decode_pinned_face_png(png_base64: str, sha256: str):
+    """CPU-only legacy transport verifier; NEVER a Comfy graph node input."""
+    if not isinstance(png_base64, str) or len(png_base64) > MAX_B64_CHARS:
+        raise ValueError("pinned_face_invalid_transport_size")
+    try:
+        raw = base64.b64decode(png_base64, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("pinned_face_invalid_base64") from exc
+    return _decode_pinned_face_bytes(raw, sha256)
+
+
+def decode_pinned_face_from_store(sha256: str, *, root=None):
+    """Only untrusted graph input is SHA; root comes from trusted config."""
+    return _decode_pinned_face_bytes(read_pinned_store(sha256, root=root), sha256)
+
+
 def encode_pinned_face_png(raw: bytes, sha256: str) -> str:
     if not isinstance(raw, bytes) or hashlib.sha256(raw).hexdigest() != sha256:
         raise ValueError("pinned_face_sha_mismatch")
@@ -65,12 +76,11 @@ def encode_pinned_face_png(raw: bytes, sha256: str) -> str:
 
 
 class WebVNPinnedFacePNG:
-    """Comfy IMAGE node: runtime uses signed-off bytes embedded in prompt graph."""
+    """Comfy IMAGE: runtime reads exact bytes from a private store by SHA."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "png_base64": ("STRING", {"multiline": True}),
             "sha256": ("STRING", {"multiline": False}),
         }}
 
@@ -78,10 +88,10 @@ class WebVNPinnedFacePNG:
     FUNCTION = "load"
     CATEGORY = "web-vn/verified-inputs"
 
-    def load(self, png_base64, sha256):
+    def load(self, sha256):
         import numpy as np
         import torch
-        image = decode_pinned_face_png(png_base64, sha256)
+        image = decode_pinned_face_from_store(sha256)
         rgb = np.asarray(image, dtype=np.float32) / 255.0
         return (torch.from_numpy(rgb).unsqueeze(0),)
 
