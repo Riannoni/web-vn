@@ -11,11 +11,17 @@ Read-only inspection: --status [--target ROLE] [--limit 1..200]
   deterministic keyset, so earlier ACKs do not skip entries. New arrivals are
   intentionally excluded until a fresh --status call without --cursor.
   Status/selection does not acknowledge, dispatch or alter wake outcomes.
+
+Dispatcher ingestion: save the actual single automation object returned by
+official peek, then --record-run PRIVATE_JSON --target ROLE --requestor dispatcher.
+Existing --status returns its latest run_observations, independently of delivery
+and consumption. Reported blockers are clues for review, never retry authority.
 """
 import argparse
 import base64
 import binascii
 from contextlib import contextmanager
+from datetime import datetime
 import hashlib
 import json
 import math
@@ -98,6 +104,10 @@ def _database(root):
                    "id INTEGER PRIMARY KEY AUTOINCREMENT,reservation_id TEXT NOT NULL,"
                    "status TEXT NOT NULL,observed_by TEXT NOT NULL,observed_at REAL NOT NULL,"
                    "receipt_sha TEXT NOT NULL,run_id TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS run_observation ("
+                   "target TEXT NOT NULL,run_id TEXT NOT NULL,started_at REAL NOT NULL,"
+                   "observed_at REAL NOT NULL,summary TEXT NOT NULL,"
+                   "PRIMARY KEY(target,run_id))")
         # Legacy rows prove only a reservation, not whether run_now was called.
         legacy = db.execute("SELECT s.* FROM wake_signal s WHERE NOT EXISTS ("
                             "SELECT 1 FROM wake_attempt a WHERE a.target=s.target AND "
@@ -277,6 +287,130 @@ def acknowledge(root, target, kind, evidence_sha, requestor, receipt_sha, run_id
     return {"acknowledged": True, "target": target, "evidence_sha": evidence_sha}
 
 
+def _reported_blockers(text):
+    """Conservative text signals, not proof of scope, permission or current health.
+
+    Historical mentions may still need review. Absence of a matched phrase never
+    proves success. Raw/private result prose is not copied into public status.
+    """
+    patterns = [
+        ("safety_denial", r"blocked by openai.s safety checks|safety[- ]denied|"
+         r"(?:policy|approval|safety) denial|"
+         r"(?:отказ|заблокирован)[^\n.]{0,100}(?:safety|безопасност)"),
+        ("unknown_submission", r"(?:unknown|uncertain)[^\n.]{0,35}(?:gpu|submi|dispatch|run_now)|"
+         r"(?:submission|run_now)[^\n.]{0,35}(?:unknown|uncertain)|"
+         r"неизвестн[^\n.]{0,35}(?:отправ|gpu|run_now)"),
+        ("authentication", r"permission denied \(publickey\)|authentication failed|"
+         r"(?:expired|invalid) (?:connector )?(?:auth|credential)|"
+         r"ошибк[^\n.]{0,30}аутентификац"),
+        ("transport", r"connection (?:timed out|timeout|reset|refused)|"
+         r"network is unreachable|could not resolve host|econnreset|etimedout|"
+         r"таймаут (?:соединения|подключения)|сброс соединения"),
+    ]
+    found = [kind for kind, pattern in patterns if re.search(pattern, text, re.I)]
+    if not found and re.search(
+            r"\b(?:blocked|hold|permission denied)\b|заблокир|недоступн|"
+            r"нового измерения[^\n.]{0,30}нет", text, re.I):
+        found.append("other_blocker")
+    return found
+
+
+def record_run(root, target, requestor, observation, now=None):
+    """Ingest official run/result evidence; NEVER mutate wake/ACK/job state.
+
+    A completed cloud turn and two false platform flags do not establish a
+    product result. Even a positive narrative needs independent artifact evidence.
+    Text classification is advisory and cannot authorize replay or fallback.
+    """
+    if target not in TARGETS or requestor not in OBSERVERS | {target, "operator"}:
+        raise ValueError("only the recipient, an existing observer or operator can record a run")
+    if not isinstance(observation, dict) or observation.get("id") != TARGETS[target]:
+        raise ValueError("automation identity does not match target")
+    details = observation.get("run_details") or {}
+    run = details.get("last_run") or {}
+    result = details.get("latest_result")
+    run_id, cloud = run.get("id"), run.get("recorded_status")
+    receipt_sha = hashlib.sha256(json.dumps(
+        observation, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")).hexdigest()
+    _receipt(receipt_sha, run_id, require_run=True)
+    if cloud not in {"in_progress", "completed", "failed", "no_update"}:
+        raise ValueError("observed official cloud status required")
+    try:
+        started = datetime.fromisoformat(run["started_at"].replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            raise ValueError("timezone missing")
+        started_at = started.timestamp()
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        raise ValueError("official timezone-aware started_at required") from exc
+    matches = isinstance(result, dict) and result.get("run_id") == run_id
+    result = result if matches else {}
+    text = result.get("content_text")
+    text = text if isinstance(text, str) else ""
+    kinds = _reported_blockers(text) if matches else []
+    if cloud == "failed" or result.get("is_failure_message") is True:
+        kinds.append("platform_failure")
+    if result.get("requires_user_action") is True:
+        kinds.append("user_action_required")
+    complete_text = bool(matches and text and result.get("content_truncated") is False)
+    operation = ("blocker_reported" if kinds else
+                 "no_blocker_reported" if complete_text else "not_observed")
+    if "safety_denial" in kinds:
+        action = "honor_denial_no_replay"
+    elif "unknown_submission" in kinds:
+        action = "reconcile_unknown_no_replay"
+    elif "authentication" in kinds:
+        action = "verify_authentication"
+    elif kinds == ["transport"]:
+        # Recheck health only; no original operation, wake or submit retry.
+        action = "fresh_read_only_health_diagnostic"
+    else:
+        action = "inspect_reported_blocker" if kinds else "verify_product_evidence"
+    diagnostic_plan = None
+    if kinds == ["transport"] and complete_text:
+        diagnostic_plan = {
+            "operation": "read_only_health_check", "automatic": False,
+            "max_retries": 3, "delays_seconds": [10, 30, 60],
+            "scope": "current_transient_episode_within_current_run",
+            "requires": ["fresh_transient_transport_failure", "available_timer"],
+            "stop_on": ["health_restored", "any_non_transport_failure", "budget_exhausted"],
+            "replay_original_operation": False,
+        }
+    summary = {
+        "target": target, "run_id": run_id, "cloud_status": cloud,
+        "started_at": run["started_at"], "result_matches_run": matches,
+        "operation_state": operation, "blocker_kinds": kinds,
+        "product_result": "unverified", "next_action": action,
+        "diagnostic_retry_plan": diagnostic_plan,
+        "is_failure_message": result.get("is_failure_message"),
+        "requires_user_action": result.get("requires_user_action"),
+        "content_truncated": result.get("content_truncated"),
+        "receipt_sha": receipt_sha,
+    }
+    with _database(root) as db:
+        db.execute("BEGIN IMMEDIATE")
+        previous = db.execute("SELECT summary FROM run_observation WHERE target=? AND run_id=?",
+                              (target, run_id)).fetchone()
+        if previous:
+            old = json.loads(previous["summary"])
+            if ((old["cloud_status"] != "in_progress" and cloud == "in_progress")
+                    or (old["result_matches_run"] and not matches)
+                    or (old["content_truncated"] is False
+                        and summary["content_truncated"] is not False)):
+                db.execute("COMMIT")
+                return {"recorded": False, "reason": "stale_run_observation",
+                        "observation": old, "automations_invoked": False,
+                        "automatic_retry": False}
+        db.execute("INSERT INTO run_observation VALUES (?,?,?,?,?) "
+                   "ON CONFLICT(target,run_id) DO UPDATE SET "
+                   "observed_at=excluded.observed_at,summary=excluded.summary",
+                   (target, run_id, started_at, time.time() if now is None else now,
+                    json.dumps(summary, sort_keys=True)))
+        db.execute("COMMIT")
+    return {"recorded": True, "observation": summary,
+            "automations_invoked": False, "automatic_retry": False}
+
+
 STATUS_MAX_PAGE = 200
 
 
@@ -368,6 +502,12 @@ def status(root, target=None, limit=STATUS_MAX_PAGE, cursor=None):
                     "after": [last["created_at"], last["target"],
                               last["event_kind"], last["evidence_sha"]]
                 })
+            observations = db.execute(
+                "SELECT summary FROM (SELECT target,summary,ROW_NUMBER() OVER ("
+                "PARTITION BY target ORDER BY started_at DESC,observed_at DESC,run_id DESC) rank "
+                "FROM run_observation WHERE (? IS NULL OR target=?)) "
+                "WHERE rank=1 ORDER BY target", (target, target)).fetchall()
+            run_observations = [json.loads(row["summary"]) for row in observations]
             db.execute("COMMIT")
         except BaseException:
             db.execute("ROLLBACK")
@@ -375,7 +515,8 @@ def status(root, target=None, limit=STATUS_MAX_PAGE, cursor=None):
     return {"pending": pending, "pending_total": global_total,
             "filtered_total": filtered_total, "global_total": global_total,
             "truncated": has_more, "next_cursor": next_cursor,
-            "page_limit": limit, "automations_invoked": False}
+            "page_limit": limit, "automations_invoked": False,
+            "run_observations": run_observations}
 
 
 def main():
@@ -391,6 +532,8 @@ def main():
     actions.add_argument("--status", action="store_true")
     actions.add_argument("--acknowledge", action="store_true")
     actions.add_argument("--record-outcome", choices=sorted(OUTCOMES))
+    actions.add_argument("--record-run", metavar="PRIVATE_JSON",
+                         help="record one official peek automation object; never dispatch")
     p.add_argument("--reason", default="target_busy")
     p.add_argument("--reservation-id")
     p.add_argument("--receipt-sha")
@@ -403,6 +546,13 @@ def main():
     if args.status:
         result = status(args.root, target=args.target,
                         limit=args.limit, cursor=args.cursor)
+    elif args.record_run:
+        if not args.target or not args.requestor:
+            p.error("target and requestor are required")
+        if args.cursor is not None or args.limit != STATUS_MAX_PAGE:
+            p.error("--limit and --cursor are status-only")
+        result = record_run(args.root, args.target, args.requestor,
+                            json.loads(Path(args.record_run).read_text(encoding="utf-8")))
     else:
         if args.cursor is not None or args.limit != STATUS_MAX_PAGE:
             p.error("--limit and --cursor are status-only")
