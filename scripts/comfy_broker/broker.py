@@ -86,7 +86,17 @@ class Broker:
         self.external_auth_digest = external_auth_digest
         self.root = Path(state_dir)
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.root, 0o700)
+        # A path alias may redirect chmod and SQLite into an unrelated tree.
+        # Open the actual directory without following the final symlink before
+        # altering its permissions or creating durable broker state.
+        try:
+            root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise ValueError("broker_state_dir_symlink_or_unsafe_directory") from exc
+        try:
+            os.fchmod(root_fd, 0o700)
+        finally:
+            os.close(root_fd)
         self.lock_file = (self.root / "broker.lock").open("a+")
         try:
             fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
