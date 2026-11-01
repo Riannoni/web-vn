@@ -216,7 +216,54 @@ class SDXLCanonicalSpriteFactorTests(unittest.TestCase):
         self.assertEqual(original, decode_pinned_face_png(
             node["inputs"]["png_base64"], node["inputs"]["sha256"]).tobytes())
 
+    def test_pinned_node_decode_transport_without_optional_torch_in_ci(self):
+        """Test real node byte decoding + NumPy pixel values; fake only torch bridge.
+
+        Hosted CPU CI deliberately does not install the GPU runtime's large
+        torch dependency. This shim is NOT evidence of real torch/Comfy
+        execution; the separate real-torch test below runs on the target PC.
+        """
+        import sys
+        import types
+        import numpy as np
+
+        class FakeCpuTensor:
+            def __init__(self, values):
+                self.values = values
+
+            def unsqueeze(self, axis):
+                return FakeCpuTensor(np.expand_dims(self.values, axis))
+
+            @property
+            def shape(self):
+                return self.values.shape
+
+            @property
+            def device(self):
+                return "cpu"
+
+            def __getitem__(self, index):
+                return self.values[index]
+
+        shim = types.ModuleType("torch")
+        shim.from_numpy = lambda values: FakeCpuTensor(values)
+        graph, _ = self._build()
+        node = graph["17"]["inputs"]
+        with patch.dict(sys.modules, {"torch": shim}):
+            tensor, = WebVNPinnedFacePNG().load(
+                node["png_base64"], node["sha256"])
+        self.assertEqual(tuple(tensor.shape), (1, 512, 512, 3))
+        self.assertEqual(str(tensor.device), "cpu")
+        self.assertAlmostEqual(float(tensor[0,0,0,0]), 240 / 255, places=6)
+        self.assertAlmostEqual(float(tensor[0,0,0,1]), 20 / 255, places=6)
+        self.assertAlmostEqual(float(tensor[0,1,1,0]), 60 / 255, places=6)
+
     def test_actual_comfy_pinned_node_cpu_tensor_matches_reference_pixels(self):
+        """Real torch path, exercised on target PC; optional on hosted CI."""
+        try:
+            import torch  # noqa: F401 - deliberate runtime dependency test
+        except ImportError:
+            self.skipTest("PyTorch is absent from lean hosted CI; target-PC torch validation required")
         graph, _ = self._build()
         node = graph["17"]["inputs"]
         tensor, = WebVNPinnedFacePNG().load(
