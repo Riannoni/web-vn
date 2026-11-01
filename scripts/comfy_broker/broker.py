@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import ExitStack
 import fcntl
 import hashlib
 import hmac
@@ -86,29 +87,42 @@ class Broker:
         self.external_auth_digest = external_auth_digest
         self.root = Path(state_dir)
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # A path alias may redirect chmod and SQLite into an unrelated tree.
-        # Open the actual directory without following the final symlink before
-        # altering its permissions or creating durable broker state.
-        try:
-            root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        except OSError as exc:
-            raise ValueError("broker_state_dir_symlink_or_unsafe_directory") from exc
-        try:
+        # Never re-resolve the mutable state-root pathname after validation.
+        # Keep a Linux directory descriptor pinned through SQLite/WAL operations.
+        with ExitStack() as ownership:
+            try:
+                root_fd = os.open(
+                    self.root, os.O_RDONLY | os.O_DIRECTORY |
+                    os.O_NOFOLLOW | os.O_CLOEXEC)
+            except OSError as exc:
+                raise ValueError("broker_state_dir_symlink_or_unsafe_directory") from exc
+            ownership.callback(os.close, root_fd)
             os.fchmod(root_fd, 0o700)
-        finally:
-            os.close(root_fd)
-        self.lock_file = (self.root / "broker.lock").open("a+")
-        try:
-            fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            self.lock_file.close()
-            raise RuntimeError("another_broker_owns_state_directory") from exc
-        self.db = sqlite3.connect(self.root / "broker.sqlite3", isolation_level=None)
-        self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA synchronous=FULL")
-        os.chmod(self.root / "broker.sqlite3", 0o600)
-        self.db.executescript("""
+            lock_fd = os.open(
+                "broker.lock", os.O_RDWR | os.O_APPEND | os.O_CREAT |
+                os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=root_fd)
+            try:
+                lock_file = os.fdopen(lock_fd, "a+")
+            except BaseException:
+                os.close(lock_fd)
+                raise
+            ownership.callback(lock_file.close)
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("another_broker_owns_state_directory") from exc
+            # sqlite3.connect has no dir_fd. /proc/self/fd/N is anchored to
+            # our held inode even if the configured pathname gets swapped.
+            # This service already requires Linux (systemd + nftables).
+            db = sqlite3.connect(
+                f"/proc/self/fd/{root_fd}/broker.sqlite3", isolation_level=None)
+            ownership.callback(db.close)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA synchronous=FULL")
+            os.chmod("broker.sqlite3", 0o600, dir_fd=root_fd,
+                     follow_symlinks=False)
+            db.executescript("""
           CREATE TABLE IF NOT EXISTS jobs (
             key TEXT PRIMARY KEY, digest TEXT NOT NULL,
             prompt_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL,
@@ -137,6 +151,10 @@ class Broker:
           INSERT OR IGNORE INTO external_free(singleton,state,updated)
             VALUES(1,'IDLE',NULL);
         """)
+            self.root_fd = root_fd
+            self.lock_file = lock_file
+            self.db = db
+            ownership.pop_all()
         self.backend = backend.rstrip("/")
         self.wait_seconds = wait_seconds
         self.poll_seconds = poll_seconds
@@ -390,6 +408,7 @@ class Broker:
         self.db.close()
         fcntl.flock(self.lock_file, fcntl.LOCK_UN)
         self.lock_file.close()
+        os.close(self.root_fd)
 
     def status(self):
         counts = dict(self.db.execute("SELECT state,COUNT(*) FROM jobs GROUP BY state").fetchall())
