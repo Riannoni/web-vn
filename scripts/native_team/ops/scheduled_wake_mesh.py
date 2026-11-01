@@ -412,6 +412,7 @@ def record_run(root, target, requestor, observation, now=None):
 
 
 STATUS_MAX_PAGE = 200
+DISPATCH_CANDIDATE_LIMIT = 20
 
 
 def _status_cursor(payload):
@@ -457,6 +458,8 @@ def status(root, target=None, limit=STATUS_MAX_PAGE, cursor=None):
     included even when their created_at is backdated; restart without a cursor
     for a fresh scan. Consumption/ACK of an earlier page never shifts offsets.
     All existing no-filter response fields keep their original meaning.
+    A separate newest-first candidate view shares target/high-water filters,
+    independent of the history page position. It grants no dispatch permission.
     """
     if target is not None and target not in TARGETS:
         raise ValueError("unknown status target")
@@ -481,6 +484,17 @@ def status(root, target=None, limit=STATUS_MAX_PAGE, cursor=None):
             if target is not None:
                 conditions.append("target = ?")
                 params.append(target)
+            candidates = db.execute(
+                "SELECT * FROM pending_signal WHERE " + " AND ".join(conditions) +
+                " AND COALESCE((SELECT a.status FROM wake_attempt a "
+                "WHERE a.target=pending_signal.target "
+                "AND a.event_kind=pending_signal.event_kind "
+                "AND a.evidence_sha=pending_signal.evidence_sha "
+                "ORDER BY a.reserved_at DESC,a.rowid DESC LIMIT 1),"
+                "'not_dispatched')='not_dispatched' "
+                "ORDER BY created_at DESC,target DESC,event_kind DESC,evidence_sha DESC LIMIT ?",
+                (*params, DISPATCH_CANDIDATE_LIMIT)).fetchall()
+            dispatch_candidates = [dict(row) for row in candidates]
             if decoded is not None:
                 conditions.append("(created_at,target,event_kind,evidence_sha) > (?,?,?,?)")
                 params.extend(decoded[1])
@@ -490,7 +504,7 @@ def status(root, target=None, limit=STATUS_MAX_PAGE, cursor=None):
                 (*params, limit+1)).fetchall()
             has_more = len(rows) > limit
             pending = [dict(row) for row in rows[:limit]]
-            for event in pending:
+            for event in pending + dispatch_candidates:
                 attempt = _latest(db, (event["target"], event["event_kind"], event["evidence_sha"]))
                 event["delivery"] = dict(attempt) if attempt else None
             next_cursor = None
@@ -516,7 +530,11 @@ def status(root, target=None, limit=STATUS_MAX_PAGE, cursor=None):
             "filtered_total": filtered_total, "global_total": global_total,
             "truncated": has_more, "next_cursor": next_cursor,
             "page_limit": limit, "automations_invoked": False,
-            "run_observations": run_observations}
+            "run_observations": run_observations,
+            "dispatch_candidates": dispatch_candidates,
+            "dispatch_candidate_limit": DISPATCH_CANDIDATE_LIMIT,
+            "dispatch_candidate_note": "Potential inputs only: validate exact current input, "
+            "fresh official enabled/not-busy peek, then atomic reserve; no eligibility or wake claim."}
 
 
 def main():
