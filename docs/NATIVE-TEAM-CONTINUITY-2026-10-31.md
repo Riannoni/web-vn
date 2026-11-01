@@ -1,5 +1,8 @@
 # Native Team continuity — 31 October 2026
 
+> **HISTORICAL RECORD — not an operating procedure after the owner's 2026-11-01 reset.** Old role counts, approval chains, model restrictions, task priorities and restart requirements below are archived evidence only. Use current [AGENTS](../AGENTS.md), [worker contract](WORKER-OPERATING-CONTRACT-2026-10-31.md) and [LAB scope](LAB-EXCLUSIVE-FAST-PATH-2026-10-31.md). Do not resume old tasks from this document.
+
+
 ## Current goal and operating authority
 
 Read `AGENTS.md`, full `docs/DEVELOPMENT-AND-TESTING.md`, then [WORKER-OPERATING-CONTRACT-2026-10-31.md](WORKER-OPERATING-CONTRACT-2026-10-31.md). The reviewed prompt source is `scripts/native_team/ops/worker-prompts.json`; [the roster](PRO-NATIVE-AUTONOMOUS-TEAM-2026-10-31.md) describes the 15 project role records, 14 enabled, with Golden Evidence Engineer paused after #76 delivery. Official `peek` and actual controller/claim state establish current liveness. A document or a Scheduled request is not a running worker.

@@ -1,15 +1,46 @@
-# Disposable P0 GPU-only lab mode (owner-authorized)
+# Private GPU experiments — direct authority, 2026-11-01
 
-**Goal:** continue actual first-shot GPU experiments without waiting for the universal PR #78 broker deployment when the current development game does not work.
+The owner authorizes a short **test → inspect → fix → retest** loop. GPU Lab alone operates the GPU and shared Comfy runtime. This document separates private diagnostic execution from production publication; the latter retains complete QA, scene-version and release controls.
 
-**Not production protection:** this mode is a reversible service-quiescence wrapper, not a host-wide technical GPU owner for arbitrary local tools. It deliberately stops *known* competing dev submitter services for the bounded experiment. Never claim it protects unknown local CLI clients; check the actual Comfy queue before and after. No release or live save writes. If an unexpected job appears, STOP rather than blind retry.
+## Admission to an experiment
 
-Local one-minute `web-vn-first-shot-autonomous.timer` invokes `scripts/first_shot/lab_exclusive.py` **only when a single immutable private one-factor candidate is already in the protected `pending/` directory**. With no ready candidate the wrapper returns `NO_APPROVED_WORK`, does not touch services and does not send GPU jobs. Independent Golden G2 review of the previous exact original PNG is still mandatory before another candidate; any `running/` or `review_pending/` will block the next submit.
+A real local source is identified and copied read-only into a private immutable fixture. Pin the source/face/outfit/contract, graph, model, seed, dimensions and one changed factor. Clearly mark source limitations. A known copied reference can be tested without a production HMAC/creation-time issuer. Unknown origin cannot establish canonical correctness.
 
-A session acquires its own exclusive maintenance lock, confirms Comfy queue empty, snapshots active/inactive service state into mode-0600 private JSON, and temporarily stops the three known GPU submitters: `mcp-vn-worker.service`, `mcp-vn-model-lab.service`, `mcp-vn-kobold-gateway.service`. It verifies all are inactive and queue still empty, then calls the already installed `autonomous_dispatch.py tick` **exactly once** with the validated private plan. The dispatcher owns the existing GPU job lock and exact prompt ID/PNG SHA/no-retry semantics. Only if it completes a known terminal state with an empty queue does the wrapper restore exactly the previously active services. If any submission or queue state becomes unknown, it keeps the competing clients quiesced and writes a recoverable private incident record. A following minute tick automatically restores the known old services when there is *no* `running/` file and queue is provably empty. Unresolved `running/` or foreign Comfy queue never triggers automatic restart/resubmit.
+Verify exclusive ownership, sufficient resources, empty/attributed queue and absence of unresolved submissions. Temporarily quiesce known competing dev submitters and preserve their previous states. Existing GPU locks are reused; do not create an independent conflicting GPU owner. Active saves and accepted assets are untouched; outputs use new private paths.
 
-**Rollback:** stop the one-minute timer; remove only the `50-lab-quiesce.conf` service drop-in; `systemctl --user daemon-reload`; restore previous service states from `autonomous/service-state.json` **only after** proving no unknown GPU job exists, then restart the timer. Do not delete output/accepted assets or active saves. The drop-in does not alter Comfy's port, production game worker files or Model Lab source; it only controls temporary service availability during a fully qualified experiment.
+**No additional Chief, Decision or Integration approval is required** for this bounded diagnostic. Merged main, universal broker, full unrelated CI, signed publication receipts and completed production integration are not admission requirements. A minimal smoke of the actual runner/graph is required. Do not weaken real connector/platform approvals.
 
-**Quality gate:** using an experimental 3/4-rear pose source/guide is allowed for ONE disposable A/B with precise source SHA and one changed factor after known dev submitters are quiesced. Such a guide is `experimental_unapproved`, NOT `production_approved`. The actual image's pose, wall contact, limbs, identity and clothing still require direct original-pixel independent Golden G2; mandatory unobservable/violated cannot pass. Local source tests and zero-submit service smoke must pass before enabling any candidate. Device VRAM/latency decide whether GPU parallelism is useful; this wrapper intentionally serializes actual diffusion.
+## Two honest execution paths
 
-**Status separation:** source-ready vs installed timer/drop-in vs actual test GPU vs independent G2 vs game browser E2E remain distinct. No unconditional GPU job from the minute timer; model hypotheses come from native ChatGPT Scheduled Renderer/Chief, never Codex/Work/paid API.
+### Existing legacy LAB
+
+The installed minute timer calls lab_exclusive.py around autonomous_dispatch.py. This dispatcher only understands its declared factors. Its existing running/review_pending fences and previous experiment identities are preserved; Golden records terminal legacy reviews with its existing writer. Do not disguise SDXL as prompt_text, delete markers, or call a queued legacy candidate accepted without evidence.
+
+### Separate private diagnostic runner
+
+When the legacy dispatcher cannot express an installed SDXL/Face-IPAdapter experiment, Lab may use a small isolated runner and existing Comfy nodes/API. No new production-dispatcher architecture is necessary. It must:
+
+- reconcile legacy running/unknown jobs and acquire the **same installed GPU ownership lock (legacy root.parent.parent / gpu-exclusive-lab.lock; use that explicit verified path, never a new root-derived lock)**; stop if its exact lock cannot be established;
+- stop known competing dev submitters, verify inactivity and queue before submission;
+- accept only the frozen private experiment, use private image upload/LoadImage where needed, preserve decoded opacity/face identity truth and avoid private PNG bytes in public logs/GitHub;
+- write a pre-submit manifest and exact prompt ID immediately, preserve unknown submissions without resend, and bind the original/final PNG by actual history and hash;
+- record wall/stage durations, return known terminal state, and restore only previously active services after queue/ownership reconciliation;
+- keep a distinct private experiment directory/IDs and never overwrite or clear legacy pending/running/review_pending records.
+
+This is an authorized diagnostic route, not a workaround for a denied tool operation and not production broker protection. Unknown local GPU clients remain an explicit limitation; any foreign job stops the sequence.
+
+## Budget and feedback
+
+Baseline plus one candidate is the default; at most three actual GPU submissions per hypothesis with declared controls, including known terminal failures without usable PNGs. Every next trial follows a known outcome and stated causal change. Producer promptly inspects the exact output; Golden independently reviews in parallel. At most two new diagnostic outputs may await independent review. Record these limits in the private experiment manifest: they persist across Scheduled runs, worker changes and renamed variants. An adaptive follow-up requires actual inspection of the exact prior pixels; unavailable pixels do not justify another attempt. Reaching that cap pauses further generation, not unrelated CPU work.
+
+Independent review is required for G2/publication, not a mandatory Chief/Decision approval before each diagnostic. A visual FAIL is actionable evidence; after two or three failed repairs of one defect choose a different hypothesis, not another cosmetic reroll. Missing exact output/unknown submission/resource fault/conflicting owner/protected-data damage stops the GPU lane.
+
+Do not compare diagnostic trials as fresh first-shot successes. Freeze a new held-out acceptance pack later. No output is auto-published.
+
+## Runtime activation and rollback
+
+The existing owner authorization includes a narrow reversible experiment installation and needed service restart by GPU Lab, including already-reviewed telemetry. Preserve old files/service states; inspect queue/lease, apply only the intended component, verify actual loaded version and health, run the measurement, restore if incompatible. An isolated CPU service/port is preferable when sufficient. An unrelated production-hardening PR is not a prerequisite.
+
+The known legacy wrapper snapshots services in autonomous/service-state.json and restores them only after known terminal completion and empty queue. Unknown submissions remain quiesced for reconciliation. Do not restart over a foreign job, reset another owner's lease or pretend an install took place because source merged.
+
+Report actual prompt/output IDs, new original-pixel findings, full/partial timing with limits, retained input integrity and the next test. Never count the timer's NO_APPROVED_WORK, a downloaded model or a source-only PR as a GPU experiment.
