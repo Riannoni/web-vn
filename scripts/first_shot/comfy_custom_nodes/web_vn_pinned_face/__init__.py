@@ -84,6 +84,16 @@ class WebVNPinnedFacePNG:
             "sha256": ("STRING", {"multiline": False}),
         }}
 
+    @classmethod
+    def VALIDATE_INPUTS(cls, sha256):
+        # Comfy preflight must reject missing/mismatched private bytes before
+        # GPU execution. Recheck again in load() to close post-validation races.
+        try:
+            decode_pinned_face_from_store(sha256)
+            return True
+        except (OSError, ValueError):
+            return "pinned_face_runtime_source_not_verified"
+
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "load"
     CATEGORY = "web-vn/verified-inputs"
