@@ -324,6 +324,8 @@ def analyze(kind,image,spec,quality,identity_ref=None,candidate_face=None):
    "identity_similarity":similarity,
    "identity_face_visibility":(face_similarity_decision(spec,similarity,caption)["verdict"]
        if kind=="sprite" else "not_checked"),
+   "identity_decision_reason":(face_similarity_decision(spec,similarity,caption)["reason"]
+       if kind=="sprite" else "not_checked"),
    "scene_count_verified":scene_count_verified,
    "scene_location_verified":scene_location_verified,
    "scene_count_confidence":scene_count_confidence,

@@ -1085,6 +1085,8 @@ def assess(job,raw,background):
                 metrics["identity_similarity"]=float(validation["identity_similarity"])
             if validation.get("identity_face_visibility"):
                 metrics["identity_face_visibility"]=str(validation["identity_face_visibility"])
+            if validation.get("identity_decision_reason"):
+                metrics["identity_decision_reason"]=str(validation["identity_decision_reason"])[:64]
             # Independent visual-grounding measurements are retained in the
             # server job record. A generic VLM answer is not proof of the cast.
             for field in ("scene_action_observation","scene_action_evidence",
@@ -1156,8 +1158,8 @@ def assess(job,raw,background):
         evidence["identity"]={"verdict":"unobservable" if visibility=="unobservable" else
             "violated" if sim is not None and sim<.80 else
             "verified" if sim is not None and sim>=.86 else "unobservable",
-            "confidence":sim if visibility!="unobservable" else None,
-            "reason":"face_occluded" if visibility=="unobservable" else "face_similarity"}
+            "confidence":sim,
+            "reason":metrics.get("identity_decision_reason") or "not_reported"}
     if kind=="scene" and wall_brace_required(action_spec):
         features=metrics.get("scene_action_evidence")
         features=features if isinstance(features,dict) else {}
