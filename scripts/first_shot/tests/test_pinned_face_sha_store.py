@@ -92,6 +92,23 @@ class PrivateFaceStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "store_unavailable"):
             read_pinned_store(self.sha, root=alias)
 
+    def test_node_preflight_rejects_missing_or_changed_store_bytes(self):
+        with patch.dict(os.environ, {"WEB_VN_PINNED_FACE_DIR": str(self.store)}):
+            self.assertEqual(
+                WebVNPinnedFacePNG.VALIDATE_INPUTS(self.sha),
+                "pinned_face_runtime_source_not_verified",
+            )
+            stage_pinned_store(self.raw, self.sha, root=self.store)
+            self.assertIs(WebVNPinnedFacePNG.VALIDATE_INPUTS(self.sha), True)
+            file = self.store / (self.sha + ".png")
+            file.chmod(0o600)
+            file.write_bytes(b"changed after graph preflight")
+            file.chmod(0o400)
+            self.assertEqual(
+                WebVNPinnedFacePNG.VALIDATE_INPUTS(self.sha),
+                "pinned_face_runtime_source_not_verified",
+            )
+
     @unittest.skipUnless(importlib.util.find_spec("torch"), "real torch not installed in lightweight hosted CI")
     def test_real_comfy_cpu_node_reads_only_sha_with_exact_pixels(self):
         stage_pinned_store(self.raw, self.sha, root=self.store)
