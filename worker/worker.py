@@ -1158,6 +1158,8 @@ def assess(job,raw,background):
             "verified" if sim is not None and sim>=.86 else "unobservable",
             "confidence":sim if visibility!="unobservable" else None,
             "reason":"face_occluded" if visibility=="unobservable" else "face_similarity"}
+        if spec.get("face_asset") and evidence["identity"]["verdict"]!="verified":
+            reasons.append("Mandatory sprite identity is "+evidence["identity"]["verdict"])
     if kind=="scene" and wall_brace_required(action_spec):
         features=metrics.get("scene_action_evidence")
         features=features if isinstance(features,dict) else {}
