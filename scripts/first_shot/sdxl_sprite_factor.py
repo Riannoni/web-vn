@@ -147,7 +147,16 @@ def read_source(root, source_sha, *, comfy_input=None):
     if digest(graph) != _require_sha(src.get("baseline_graph_sha256"), "baseline_graph"):
         raise ValueError("baseline_graph_changed")
     spec = job.get("spec")
-    variant = spec.get("variant") if isinstance(spec, dict) else None
+    if not isinstance(spec, dict):
+        raise ValueError("canonical_sprite_spec_missing")
+    if "kind" in spec and spec["kind"] != "sprite":
+        raise ValueError("canonical_sprite_kind_conflict")
+    spec_actor = spec.get("character")
+    if not isinstance(spec_actor, str) or not spec_actor.strip():
+        raise ValueError("canonical_sprite_actor_missing")
+    if "character" in job and job["character"] != spec_actor:
+        raise ValueError("canonical_actor_fields_conflict")
+    variant = spec.get("variant")
     outfit = variant.get("outfit") if isinstance(variant, dict) else None
     if not isinstance(outfit, str) or not outfit.strip() or outfit.strip().lower() in ("default","unknown"):
         raise ValueError("authentic_current_outfit_missing")
