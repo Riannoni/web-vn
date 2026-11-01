@@ -251,6 +251,24 @@ class SDXLCanonicalSpriteFactorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "canonical_current_outfit_mismatch"):
             self._validate()
 
+    def test_rejects_rehashed_conflicting_outer_actor(self):
+        # One self-authored receipt cannot make two contradictory actor IDs
+        # into an authenticated canonical identity.
+        self.job["character"] = "Actor_B"
+        self.receipt["source_job_sha256"] = sprite.digest(self.job)
+        self.repin()
+        with self.assertRaisesRegex(ValueError, "canonical_actor_fields_conflict"):
+            self._validate()
+
+    def test_rejects_rehashed_conflicting_sprite_kind(self):
+        # A kind contradiction inside spec cannot be accepted just because
+        # both the source and unsigned creation receipt were rehashed.
+        self.job["spec"]["kind"] = "cg"
+        self.receipt["source_job_sha256"] = sprite.digest(self.job)
+        self.repin()
+        with self.assertRaisesRegex(ValueError, "canonical_sprite_kind_conflict"):
+            self._validate()
+
     def test_positive_evidence_declares_only_cpu_pixel_binding(self):
         _, evidence = self._build()
         self.assertTrue(evidence["canonical_face_upload_pixels_match_cpu"])
