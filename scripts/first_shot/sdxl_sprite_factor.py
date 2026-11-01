@@ -340,6 +340,88 @@ def _open_nofollow_run_directory(run_dir):
         raise
 
 
+def read_bound_rgba_bytes(root, experiment_id, record):
+    """Read the exact derivative from a new inode- and SHA-checked open FD.
+
+    A returned pathname is only a locator, NOT an enduring byte capability:
+    rename/rebind after the producer closes its fd is possible. Every later
+    review/consumer must call this function at the point of use, consume the
+    returned bytes (never reopen the path), and refuse mismatches. This is
+    postprocess attribution only; source origin and G2 remain separate gates.
+    """
+    if (not isinstance(experiment_id, str)
+            or not re.fullmatch(r"[A-Z][A-Z0-9_-]{5,55}", experiment_id)
+            or not isinstance(record, dict)):
+        raise ValueError("derived_rgba_binding_invalid")
+    root = _platform_home_alias(root)
+    run_dir = root / "runs" / experiment_id
+    name = "sprite-rgba-candidate.png"
+    if record.get("derived_rgba_path") != str(run_dir / name):
+        raise ValueError("derived_rgba_path_rebound")
+    expected_sha = _require_sha(record.get("derived_rgba_sha256"), "derived_rgba")
+    _require_sha(record.get("original_png_sha256"), "comfy_original")
+    keys = ("derived_rgba_run_dev", "derived_rgba_run_ino",
+            "derived_rgba_file_dev", "derived_rgba_file_ino")
+    if any(type(record.get(key)) is not int or record[key] < 0 for key in keys):
+        raise ValueError("derived_rgba_binding_invalid")
+    directory_fd = None
+    try:
+        directory_fd = _open_nofollow_run_directory(run_dir)
+        actual_run = os.fstat(directory_fd)
+        if (actual_run.st_dev, actual_run.st_ino) != (
+                record["derived_rgba_run_dev"], record["derived_rgba_run_ino"]):
+            raise ValueError("derived_rgba_path_rebound")
+        file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                          dir_fd=directory_fd)
+        try:
+            actual_file = os.fstat(file_fd)
+            if (not stat.S_ISREG(actual_file.st_mode)
+                    or actual_file.st_size > MAX_PRIVATE_IMAGE
+                    or (actual_file.st_dev, actual_file.st_ino) != (
+                        record["derived_rgba_file_dev"],
+                        record["derived_rgba_file_ino"])):
+                raise ValueError("derived_rgba_path_rebound")
+            remaining = MAX_PRIVATE_IMAGE + 1
+            pieces = []
+            while remaining:
+                piece = os.read(file_fd, min(65536, remaining))
+                if not piece:
+                    break
+                pieces.append(piece)
+                remaining -= len(piece)
+            raw = b"".join(pieces)
+            if len(raw) > MAX_PRIVATE_IMAGE:
+                raise ValueError("derived_rgba_binding_invalid")
+        finally:
+            os.close(file_fd)
+    except OSError as exc:
+        raise ValueError("derived_rgba_path_rebound") from exc
+    except ValueError as exc:
+        if str(exc) == "missing_private_sprite_run":
+            raise ValueError("derived_rgba_path_rebound") from exc
+        raise
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+    if digest(raw) != expected_sha:
+        raise ValueError("derived_rgba_path_sha_mismatch")
+    from PIL import Image, ImageFile
+    try:
+        if ImageFile.LOAD_TRUNCATED_IMAGES:
+            raise ValueError("unsafe_truncated_png_decoder_policy")
+        with Image.open(io.BytesIO(raw)) as png:
+            if png.format != "PNG" or png.mode != "RGBA":
+                raise ValueError("derived_rgba_pixels_invalid")
+            if png.width > 4096 or png.height > 4096 or png.width < 1 or png.height < 1:
+                raise ValueError("derived_rgba_pixels_invalid")
+            png.load()
+            if png.getchannel("A").getextrema() != (0, 255):
+                raise ValueError("derived_rgba_pixels_invalid")
+    except (OSError, SyntaxError, Image.DecompressionBombError) as exc:
+        raise ValueError("derived_rgba_pixels_invalid") from exc
+    return raw
+
+
 def derive_rgba_candidate(root, experiment_id, original_png_path, original_sha256):
     """Generate a private, nonpublishable RGBA from pinned original bytes.
 
@@ -358,6 +440,7 @@ def derive_rgba_candidate(root, experiment_id, original_png_path, original_sha25
     root = _platform_home_alias(root)
     run_dir = root / "runs" / experiment_id
     run_fd = _open_nofollow_run_directory(run_dir)
+    run_identity = os.fstat(run_fd)
     try:
         name = "sprite-rgba-candidate.png"
         try:
@@ -421,7 +504,15 @@ def derive_rgba_candidate(root, experiment_id, original_png_path, original_sha25
         finally:
             os.unlink(scratch, dir_fd=run_fd)
 
-        return {
+        final_identity = os.stat(name, dir_fd=run_fd, follow_symlinks=False)
+        if not stat.S_ISREG(final_identity.st_mode):
+            raise ValueError("derived_rgba_path_rebound")
+        evidence = {
+            "derived_rgba_run_dev": run_identity.st_dev,
+            "derived_rgba_run_ino": run_identity.st_ino,
+            "derived_rgba_file_dev": final_identity.st_dev,
+            "derived_rgba_file_ino": final_identity.st_ino,
+            "derived_rgba_binding": "REOPEN_FD_AND_SHA_AT_EACH_CONSUMPTION",
             "original_png_sha256": original_sha256,
             "derived_rgba_sha256": derived_sha,
             "derived_rgba_path": str(run_dir / name),
@@ -435,5 +526,10 @@ def derive_rgba_candidate(root, experiment_id, original_png_path, original_sha25
             "published": False,
             "human_labeled": False,
         }
+        # Detect a producer-side directory rebound before returning a path.
+        # The filename remains untrusted after return; consumers re-open via
+        # read_bound_rgba_bytes() immediately before using those verified bytes.
+        read_bound_rgba_bytes(root, experiment_id, evidence)
+        return evidence
     finally:
         os.close(run_fd)
