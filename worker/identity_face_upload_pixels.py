@@ -120,7 +120,12 @@ def verify_sprite_face_upload(
         canonical_rgb, (512, 512),
         method=Image.Resampling.LANCZOS,
     )
-    if uploaded.mode != "RGB" or uploaded.size != (512, 512):
+    # PNG tRNS can preserve PIL mode RGB while assigning alpha=0 to an RGB
+    # color. The Comfy consumer expects an actually opaque RGB image, not
+    # merely a mode string and byte-identical hidden RGB samples. Reject
+    # tRNS even when the transparency key does not occur in the pixels.
+    if (uploaded.mode != "RGB" or uploaded.size != (512, 512)
+            or "transparency" in uploaded.info):
         raise FaceUploadBlocked("canonical_face_upload_mode_or_canvas_changed")
     if uploaded.tobytes() != expected.tobytes():
         raise FaceUploadBlocked("canonical_face_upload_pixels_do_not_match")
