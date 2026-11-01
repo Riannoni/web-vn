@@ -139,5 +139,59 @@ class PackPreviewTests(unittest.TestCase):
             self.reader.image_bytes('VN_1')
 
 
+
+class ModelLabRouteTests(PackPreviewTests):
+    """Exercise the actual Model Lab GET handler without binding sockets or GPU."""
+
+    def setUp(self):
+        super().setUp()
+        import server as model_lab
+        self.model_lab = model_lab
+        self.handler = model_lab.Handler.__new__(model_lab.Handler)
+        self.handler.path = '/api/mira-pack/VN_1'
+        self.handler.client_address = ('127.0.0.1', 1)
+        self.handler.headers = {}
+        self.handler.send_json = lambda status, data, extras=(): (status, data)
+        self.handler.send_data = lambda status, data, mime, extras=(): (status, data, mime)
+
+    def route(self, *, authed, path):
+        from unittest.mock import patch
+        self.handler.path = path
+        with patch.object(self.model_lab, 'MIRA_PREVIEW', self.reader), \
+             patch.object(self.handler, 'allowed', return_value=True), \
+             patch.object(self.handler, 'authorized', return_value=authed):
+            return self.handler.do_GET()
+
+    def test_unauthorized_route_returns_401(self):
+        from unittest.mock import patch
+        with patch.object(self.reader, 'image_bytes', side_effect=AssertionError('Must not read')):
+            result = self.route(authed=False, path='/api/mira-pack/VN_1')
+        self.assertEqual(result[0], 401)
+
+    def test_authenticated_exact_png_route(self):
+        code, payload, mime = self.route(authed=True, path='/api/mira-pack/VN_1')
+        self.assertEqual(code, 200)
+        self.assertEqual(payload, self.original.read_bytes())
+        self.assertEqual(mime, 'image/png')
+
+    def test_authenticated_manifest_only_discloses_ids(self):
+        code, data = self.route(authed=True, path='/api/mira-pack')
+        self.assertEqual(code, 200)
+        self.assertEqual(data['assets'], [{'id': 'VN_1', 'review': 'PROVISIONAL / NOT REVIEWED'}])
+        self.assertNotIn(str(self.original), str(data))
+
+    def test_unknown_path_and_stale_index(self):
+        self.assertEqual(self.route(authed=True, path='/api/mira-pack/VN_2')[0], 404)
+        self.index.write_text('{"changed":true}')
+        self.assertEqual(self.route(authed=True, path='/api/mira-pack/VN_1')[0], 409)
+
+    def test_existing_secure_headers_retained(self):
+        headers = {}
+        self.handler.send_header = lambda k, v: headers.__setitem__(k, v)
+        self.handler.headers_secure()
+        self.assertEqual(headers.get('Cache-Control'), 'no-store')
+        self.assertEqual(headers.get('X-Content-Type-Options'), 'nosniff')
+
+
 if __name__ == '__main__':
     unittest.main()
