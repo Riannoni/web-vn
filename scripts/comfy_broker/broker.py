@@ -124,13 +124,29 @@ class Broker:
             ownership.callback(os.close, root_fd)
             validate_sqlite_state_files(root_fd)
             os.fchmod(root_fd, 0o700)
-            lock_fd = os.open(
-                "broker.lock", os.O_RDWR | os.O_APPEND | os.O_CREAT |
-                os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=root_fd)
+            # The lock file is the single-owner recovery fence. Opening an
+            # existing hardlink/special/permissive inode must not grant GPU
+            # admission. O_NONBLOCK avoids hanging on a pre-existing FIFO;
+            # fstat binds validation to the actual opened inode.
             try:
+                lock_fd = os.open(
+                    "broker.lock", os.O_RDWR | os.O_APPEND | os.O_CREAT |
+                    os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                    0o600, dir_fd=root_fd)
+            except OSError as exc:
+                raise ValueError("unsafe_broker_lock_file") from exc
+            try:
+                info = os.fstat(lock_fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+                    raise ValueError("unsafe_broker_lock_file")
                 lock_file = os.fdopen(lock_fd, "a+")
             except BaseException:
-                os.close(lock_fd)
+                # fdopen may already close the descriptor when creation fails.
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
                 raise
             ownership.callback(lock_file.close)
             try:
