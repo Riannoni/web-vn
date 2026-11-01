@@ -197,6 +197,31 @@ def appearance_tags(description):
     if anyof("серебрист") and "знак" in t:tags.append("silver rune symbol")
     return ", ".join(tags[:10])
 
+def compact_negative_prompt(text, limit=3000):
+    """Keep every distinct comma-delimited constraint; never silently cut one.
+
+    This is an application character budget, not CLIP's per-chunk token limit.
+    Preserve the first occurrence and fail before rendering if all clauses do
+    not fit, including model-quality exclusions appended at the end.
+    """
+    # Commas inside weighted/escaped expressions are not clause boundaries.
+    # Preserve that grammar verbatim instead of attempting a partial parser.
+    if any(mark in text for mark in ("(", ")", "[", "]", "\\,")):
+        packed=text
+    else:
+        clauses=[]
+        seen=set()
+        for clause in text.split(","):
+            clause=clause.strip()
+            key=clause.casefold()
+            if clause and key not in seen:
+                clauses.append(clause)
+                seen.add(key)
+        packed=", ".join(clauses)
+    if len(packed)>limit:
+        raise ValueError(f"Negative prompt exceeds {limit}-character whole-clause budget ({len(packed)}); shorten redundant instructions")
+    return packed
+
 def prompt_builder(job, background):
     spec=job.get("spec") or {}
     assert_engine_snapshot(spec.get("engine"))
@@ -335,6 +360,13 @@ def prompt_builder(job, background):
             positive+=(f" Exactly one established adult fictional character: "
                       f"{job.get('character','')}. Stable face identity; "
                       "neutral solid backdrop for alpha extraction, no scenery.")
+            # Narration may omit stable details; a face crop cannot describe
+            # the canonical default wardrobe. Explicit outfit changes retain
+            # only the already-filtered physical traits, never old garments.
+            if traits:
+                positive+=f" Canonical traits: {traits}."
+            if outfit=="default" and str(appearance or "").strip():
+                positive+=f" Canonical default appearance and wardrobe: {appearance}."
         elif kind=="scene":
             names=[str(c.get("name","")) for c in (spec.get("characters") or [])]
             positive+=(f" Exactly {len(names)} established adult principal figures "
@@ -406,7 +438,9 @@ def prompt_builder(job, background):
         positive=retry["positive"]+" "+positive
     if retry["negative"]:
         negative=retry["negative"]+", "+negative
-    return positive[:5500],negative[:1000]
+    if len(positive)>5500:
+        raise ValueError(f"Positive prompt exceeds 5500-character budget ({len(positive)}); shorten redundant instructions")
+    return positive,compact_negative_prompt(negative)
 
 def image_graph(job):
     kind=job["kind"]
@@ -572,8 +606,8 @@ def image_graph(job):
             "pixels":["10",0],"vae":vae_ref}}
         graph["5"]["inputs"].update({"latent_image":["11",0],"denoise":0.78})
         graph["3"]["inputs"]["text"]+=(
-            " Wide environmental shot, recognizable detailed location behind the "
-            "characters, not a studio portrait or flat backdrop, a single camera view.")
+            " Recognizable location consistent with the requested camera framing; "
+            "one coherent camera perspective, not a studio backdrop.")
         # A neural CG replaces the whole shot, so it must be conditioned on
         # immutable identity anchors, NOT on a disposable pose/outfit sprite.
         people=(spec.get("characters") or [])
@@ -1372,4 +1406,5 @@ def main():
 
 if __name__=="__main__":
     main()
+
 
