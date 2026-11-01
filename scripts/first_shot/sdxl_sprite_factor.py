@@ -282,31 +282,30 @@ def build(root, p, prefix, *, comfy_input=None):
     if p.get("case") != CASE or p.get("factor") != FACTOR or p.get("new_value") != VALUE:
         raise ValueError("unexpected_typed_sdxl_factor")
     src, graph = read_source(root, p["base_case_sha256"], comfy_input=comfy_input)
-    # The baseline still validates the installed SDXL IPAdapter face topology
-    # with its original LoadImage. Replace ONLY the face transport node AFTER
-    # that guard: Comfy will decode immutable PNG bytes carried in the graph,
-    # never dereference a mutable filename after source validation.
-    from comfy_custom_nodes.web_vn_pinned_face import encode_pinned_face_png
+    # The baseline still validates the actual SDXL IPAdapter face topology.
+    # The graph must carry only an exact SHA key, never private face bytes or
+    # a mutable filename. The owner-only Lab staging is a separate, gated
+    # operation AFTER installed node preflight, immediately before submit.
     actor = src["job"]["spec"]["character"]
     upload = src["face_uploads"][actor]
     face_path = (Path(comfy_input).expanduser().resolve()
                  if comfy_input is not None
                  else Path.home() / ".local/share/mcp-vn-comfy/input") / upload["image"]
     face_sha = upload["upload_sha256"]
-    frozen_upload = _read_pinned(face_path, face_sha, max_bytes=MAX_PRIVATE_IMAGE)
+    _read_pinned(face_path, face_sha, max_bytes=MAX_PRIVATE_IMAGE)
     graph["17"] = {
         "class_type": "WebVNPinnedFacePNG",
-        "inputs": {"png_base64": encode_pinned_face_png(frozen_upload, face_sha),
-                   "sha256": face_sha},
+        "inputs": {"sha256": face_sha},
     }
     # This is a compatibility-bound input transport change, not a new sampler
     # or model factor. The node must be separately installed/reviewed by Lab;
     # an absent Comfy custom node is NOT an installed capability.
     graph["7"]["inputs"]["filename_prefix"] = prefix
     return graph, {
-        "face_input_transport": "sha_bound_embedded_png_cpu_source_only",
+        "face_input_transport": "private_content_addressed_sha_only_cpu_source",
         "face_consumer_node": "WebVNPinnedFacePNG",
-        "face_graph_payload_sha256": face_sha,
+        "face_graph_reference_sha256": face_sha,
+        "private_face_bytes_embedded_in_graph": False,
         "source_snapshot_sha256": p["base_case_sha256"],
         "source_job_sha256": src["source_job_sha256"],
         "scene_contract_sha256": src["scene_contract_sha256"],
@@ -331,6 +330,44 @@ def build(root, p, prefix, *, comfy_input=None):
         "publish_eligible": False,
         "g2": "NOT_REVIEWED",
         "published": False,
+    }
+
+
+
+def stage_for_graph(root, p, graph, *, comfy_input=None, store_root=None):
+    """GPU Lab-only pre-submit staging, after installed node and queue gates.
+
+    This never submits a Comfy prompt, switches a GPU model, installs a node,
+    or authorizes publication. No graph field or log carries the private PNG.
+    The trusted Comfy-side WEB_VN_PINNED_FACE_DIR mount must independently
+    expose exactly the same files in its own private read-only execution
+    namespace before Lab activates the candidate.
+    """
+    if (p.get("case"), p.get("factor"), p.get("new_value")) != (CASE, FACTOR, VALUE):
+        raise ValueError("unexpected_typed_sdxl_factor")
+    node = graph.get("17") if isinstance(graph, dict) else None
+    if not isinstance(node, dict) or node.get("class_type") != "WebVNPinnedFacePNG":
+        raise ValueError("pinned_face_consumer_graph_changed")
+    src, _ = read_source(root, p["base_case_sha256"], comfy_input=comfy_input)
+    actor = src["job"]["spec"]["character"]
+    upload = src["face_uploads"][actor]
+    face_sha = upload["upload_sha256"]
+    if node.get("inputs") != {"sha256": face_sha}:
+        raise ValueError("pinned_face_graph_source_sha_mismatch")
+    face_path = (Path(comfy_input).expanduser().resolve()
+                 if comfy_input is not None
+                 else Path.home() / ".local/share/mcp-vn-comfy/input") / upload["image"]
+    raw = _read_pinned(face_path, face_sha, max_bytes=MAX_PRIVATE_IMAGE)
+    from comfy_custom_nodes.web_vn_pinned_face import _decode_pinned_face_bytes
+    from comfy_custom_nodes.web_vn_pinned_face.sha_store import stage_pinned_store
+    _decode_pinned_face_bytes(raw, face_sha)
+    if store_root is None:
+        store_root = os.environ.get("WEB_VN_PINNED_FACE_HOST_DIR")
+    stage_pinned_store(raw, face_sha, root=store_root)
+    return {
+        "face_staged_sha256": face_sha,
+        "face_store_prepared_for_comfy": True,
+        "face_comfy_mount_verified": False,
     }
 
 
