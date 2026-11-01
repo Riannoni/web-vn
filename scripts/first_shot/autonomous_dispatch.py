@@ -176,9 +176,8 @@ def _pinned_face_node_installed(object_info):
         return False
     ins = (node.get("input") or {}).get("required") or {}
     output = node.get("output")
-    return (isinstance(ins, dict) and
-            all(k in ins and isinstance(ins[k], list) and
-                ins[k][0] == "STRING" for k in ("png_base64", "sha256")) and
+    return (isinstance(ins, dict) and set(ins) == {"sha256"} and
+            isinstance(ins["sha256"], list) and ins["sha256"][0] == "STRING" and
             output == ["IMAGE"])
 
 
@@ -230,6 +229,17 @@ def tick(root):
                 path.replace(root / "blocked" / path.name)
                 return {"status": "BLOCKED_UNINSTALLED_PINNED_FACE_NODE",
                         "id": p["id"]}
+            # No source PNG goes into the prompt/history. The owner-only Lab
+            # copies verified bytes into a private out-of-band SHA store.
+            # A missing/unsafe store stops before any Comfy GPU submit.
+            try:
+                import sdxl_sprite_factor as sprite
+                face_stage_evidence = sprite.stage_for_graph(root, p, graph)
+                pose_evidence.update(face_stage_evidence)
+            except Exception as exc:
+                path.replace(root / "blocked" / path.name)
+                return {"status": "BLOCKED_PRIVATE_PINNED_FACE_STORE",
+                        "detail": type(exc).__name__, "id": p["id"]}
         graph_sha = sha(json.dumps(graph, sort_keys=True).encode())
         record = dict(p)
         record.update(status="PREPARED_NOT_SUBMITTED",
