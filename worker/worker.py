@@ -1096,6 +1096,8 @@ def assess(job,raw,background):
             warnings.extend(str(x)[:180] for x in validation.get("warnings",[])[:4])
             if semantic=="failed":
                 reasons.extend(str(x)[:170] for x in validation.get("reasons",[])[:4])
+                if not validation.get("reasons"):
+                    reasons.append("Semantic QA rejected image without specific reasons")
             elif semantic=="unavailable":
                 metrics["vlm_error"]=str(validation.get("reason","VLM unavailable"))[:140]
         except (OSError,ValueError,TimeoutError,URLError,HTTPError) as error:
