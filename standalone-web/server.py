@@ -21,6 +21,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import vn_web
+from pack_preview import PackPreview, PreviewError
 
 HOST, PORT = "192.168.50.27", 8190
 COMFY = "http://127.0.0.1:8188"
@@ -304,6 +305,7 @@ class Store:
     print("GENERATION_ERROR",ident,type(exc).__name__,str(exc)[:120],flush=True)
    finally:self.q.task_done()
 STORE=None
+MIRA_PREVIEW=PackPreview()
 FAILED={}
 FAIL_LOCK=threading.Lock()
 class Handler(BaseHTTPRequestHandler):
@@ -351,6 +353,12 @@ class Handler(BaseHTTPRequestHandler):
    if not f.exists():return self.send_json(404,{"error":"No static file"})
    return self.send_data(200,f.read_bytes(),mime+"; charset=utf-8")
   if not self.authorized():return self.send_json(401,{"error":"Авторизуйтесь"})
+  if path=="/api/mira-pack":
+   try:return self.send_json(200,{"assets":[{"id":id_,"review":"PROVISIONAL / NOT REVIEWED"} for id_ in MIRA_PREVIEW.visible_ids()]})
+   except PreviewError as exc:return self.send_json(exc.status,{"error":"Private pack view unavailable"})
+  if path.startswith("/api/mira-pack/"):
+   try:return self.send_data(200,MIRA_PREVIEW.image_bytes(path.removeprefix("/api/mira-pack/")),"image/png")
+   except PreviewError as exc:return self.send_json(exc.status,{"error":"Private pack view unavailable"})
   if path.startswith("/api/vn/"):
    try:
     if path.startswith("/api/vn/assets/"):
