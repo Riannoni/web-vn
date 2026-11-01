@@ -36,6 +36,7 @@ from render_retry import retry_plan,permanent_render_failure
 from engine_policy import assert_engine_snapshot
 from scene_action_contract import wall_brace_required,resolve_scene_action
 from pose_geometry_runtime import verify_with_comfy
+from identity_observation import face_observability
 
 SERVER = os.environ.get("VN_SERVER", "http://192.168.50.29:3100").rstrip("/")
 TOKEN = os.environ["VN_WORKER_TOKEN"]
@@ -1160,6 +1161,16 @@ def assess(job,raw,background):
             "verified" if sim is not None and sim>=.86 else "unobservable",
             "confidence":sim,
             "reason":metrics.get("identity_decision_reason") or "not_reported"}
+        # Facial identity is mandatory only when the view permits comparison.
+        # A rear request alone is not proof that the output is rear-facing.
+        rear_requested=(face_observability(spec)["verdict"]=="unobservable")
+        rear_corrob=(rear_requested and
+            metrics.get("identity_decision_reason")=="rear_pose_corrobated" and
+            evidence["identity"]["verdict"]=="unobservable")
+        if spec.get("face_asset") and not rear_corrob and evidence["identity"]["verdict"]!="verified":
+            reasons.append("Mandatory sprite identity is "+evidence["identity"]["verdict"])
+        if rear_requested and not rear_corrob:
+            reasons.append("Requested rear/occluded sprite pose not corroborated")
     if kind=="scene" and wall_brace_required(action_spec):
         features=metrics.get("scene_action_evidence")
         features=features if isinstance(features,dict) else {}
