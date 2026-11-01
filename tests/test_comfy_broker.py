@@ -485,6 +485,46 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
             recovered = m.Broker(displaced, "http://127.0.0.1:9")
             await recovered.stop()
 
+    async def _assert_sqlite_main_file_alias_rejected(self, alias_type):
+        # Disposable CPU-only fixture. Broker must reject an external DB
+        # alias BEFORE SQLite switches that unrelated file to WAL mode.
+        import sqlite3
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            state = base / "state"
+            other = base / "other"
+            state.mkdir()
+            other.mkdir()
+            outside = other / "untouched.sqlite3"
+            connection = sqlite3.connect(outside)
+            connection.execute("CREATE TABLE existing(k INTEGER)")
+            connection.execute("INSERT INTO existing VALUES(1)")
+            connection.commit()
+            connection.close()
+            before = hashlib.sha256(outside.read_bytes()).hexdigest()
+            alias = state / "broker.sqlite3"
+            if alias_type == "symlink":
+                alias.symlink_to(outside)
+            elif alias_type == "hardlink":
+                alias.hardlink_to(outside)
+            else:
+                raise AssertionError("unknown fixture alias")
+
+            candidate = None
+            try:
+                with self.assertRaisesRegex(ValueError, "unsafe_broker_sqlite_file"):
+                    candidate = m.Broker(state, "http://127.0.0.1:9")
+            finally:
+                if candidate is not None:
+                    await candidate.stop()
+            self.assertEqual(hashlib.sha256(outside.read_bytes()).hexdigest(), before)
+
+    async def test_sqlite_main_symlink_rejected_before_external_mutation(self):
+        await self._assert_sqlite_main_file_alias_rejected("symlink")
+
+    async def test_sqlite_main_hardlink_rejected_before_external_mutation(self):
+        await self._assert_sqlite_main_file_alias_rejected("hardlink")
+
     async def test_symlink_state_dir_must_not_change_target_or_create_db(self):
         # Disposable state only: an alias to a real directory must fail
         # before broker chmod/lock/SQLite can touch the referenced target.
