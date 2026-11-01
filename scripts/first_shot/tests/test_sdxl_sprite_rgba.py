@@ -135,6 +135,45 @@ class RgbaOutputTests(unittest.TestCase):
                 self.root, self.id, self.home / "original-alias" / "original.png", source_sha)
         self.assertFalse((self.root / "runs" / self.id / "sprite-rgba-candidate.png").exists())
 
+    def test_rebound_path_at_matte_handoff_fails_closed(self):
+        """An inode-pinned write must not report a different path's bytes."""
+        from firstshot_source_matte import extract_matte
+        run_dir = self.root / "runs" / self.id
+        run_dir.mkdir(parents=True)
+        displaced = Path(self.tmp.name) / "displaced-original-run"
+        alternate = Path(self.tmp.name) / "alternate-run"
+        alternate.mkdir()
+        fake = alternate / "sprite-rgba-candidate.png"
+        fake_sha = fixture(fake)
+
+        def swap_after_open(pixels):
+            result = extract_matte(pixels)
+            run_dir.rename(displaced)
+            run_dir.symlink_to(alternate, target_is_directory=True)
+            return result
+
+        with patch("firstshot_source_matte.extract_matte", side_effect=swap_after_open):
+            with self.assertRaisesRegex(ValueError, "derived_rgba_path_rebound"):
+                sprite.derive_rgba_candidate(self.root, self.id, self.source, self.source_sha)
+
+        original_inode_output = displaced / "sprite-rgba-candidate.png"
+        self.assertTrue(original_inode_output.is_file())
+        self.assertNotEqual(digest(original_inode_output.read_bytes()), fake_sha)
+        self.assertEqual(digest(fake.read_bytes()), fake_sha)
+
+    def test_late_path_substitution_is_rejected_at_consumption(self):
+        """Same PNG bytes at a substituted directory cannot impersonate origin inode."""
+        evidence = self._derive()
+        original = sprite.read_bound_rgba_bytes(self.root, self.id, evidence)
+        self.assertEqual(digest(original), evidence["derived_rgba_sha256"])
+        run_dir = self.root / "runs" / self.id
+        moved = Path(self.tmp.name) / "displaced-original-run"
+        run_dir.rename(moved)
+        run_dir.mkdir()
+        (run_dir / "sprite-rgba-candidate.png").write_bytes(original)
+        with self.assertRaisesRegex(ValueError, "derived_rgba_path_rebound"):
+            sprite.read_bound_rgba_bytes(self.root, self.id, evidence)
+
     def _simulate_tick(self, *, background=(246, 246, 246), undecodable=False):
         plan = {"id": self.id, "factor": "sdxl_sprite_body_source", "case": "SPRITE-CANONICAL"}
         pending = self.root / "pending"
