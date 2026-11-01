@@ -189,6 +189,13 @@ class RgbaOutputTests(unittest.TestCase):
         called = []
         def fake_api(route, payload=None, timeout=None):
             called.append(route)
+            if route == "/object_info":
+                # Synthetic installed-node fixture, so legacy simulated
+                # Comfy history/postprocess branches remain exercised.
+                return {"WebVNPinnedFacePNG": {
+                    "input": {"required": {"png_base64": ["STRING"],
+                                           "sha256": ["STRING"]}},
+                    "output": ["IMAGE"]}}
             if route == "/prompt":
                 return {"prompt_id": pid}
             if route == "/history/" + pid:

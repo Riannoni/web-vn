@@ -1,5 +1,6 @@
 """CPU-only exact-source SDXL body-latent factor tests; never submit Comfy."""
 import copy
+import base64
 import hashlib
 import importlib.util
 import json
@@ -17,6 +18,7 @@ spec = importlib.util.spec_from_file_location("renderer_sdxl_dispatch", ROOT_SRC
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 import sdxl_sprite_factor as sprite
+from comfy_custom_nodes.web_vn_pinned_face import (decode_pinned_face_png, encode_pinned_face_png, WebVNPinnedFacePNG)
 
 
 def n(cls, **inp):
@@ -183,13 +185,78 @@ class SDXLCanonicalSpriteFactorTests(unittest.TestCase):
         graph["5"]["inputs"]["latent_image"] = ["11",0]
         graph["5"]["inputs"]["denoise"] = .64
         graph["7"]["inputs"]["filename_prefix"] = "private-old"
-        self.assertEqual(graph, b)
+        bound = graph.pop("17")
+        self.assertEqual(bound["class_type"], "WebVNPinnedFacePNG")
+        self.assertEqual(bound["inputs"]["sha256"], self.face_sha)
+        self.assertEqual(hashlib.sha256(base64.b64decode(
+            bound["inputs"]["png_base64"])).hexdigest(), self.face_sha)
+        self.assertEqual(graph, {k: v for k,v in b.items() if k != "17"})
         self.assertEqual(evidence["source_job_sha256"], sprite.digest(self.job))
         self.assertEqual(evidence["g2"], "NOT_REVIEWED")
         self.assertEqual(evidence["producer_trust"], "SHA_BOUND_REQUIRES_INDEPENDENT_ORIGIN_REVIEW")
         self.assertEqual(evidence["alpha_status"], "NOT_PROVIDED_BY_NATIVE_VAE_GRAPH")
         self.assertFalse(evidence["publish_eligible"])
         self.assertNotIn("checkpoint_sha256_attested", evidence)
+
+    def test_face_graph_consumer_uses_content_not_mutable_comfy_filename(self):
+        graph, ev = self._build()
+        node = graph["17"]
+        self.assertEqual(ev["face_consumer_node"], "WebVNPinnedFacePNG")
+        self.assertEqual(ev["face_graph_payload_sha256"], self.face_sha)
+        before = sprite.digest(graph)
+        original = decode_pinned_face_png(node["inputs"]["png_base64"],
+                                          node["inputs"]["sha256"]).tobytes()
+        # The source file is swapped only AFTER graph construction; Comfy's
+        # in-graph node sees the same bytes and no path is present in its input.
+        Image.new("RGB", (512,512), (3, 7, 201)).save(self.input / "face0.png")
+        with self.assertRaisesRegex(ValueError, "private_source_sha_changed"):
+            self._validate()
+        self.assertNotIn("image", node["inputs"])
+        self.assertEqual(before, sprite.digest(graph))
+        self.assertEqual(original, decode_pinned_face_png(
+            node["inputs"]["png_base64"], node["inputs"]["sha256"]).tobytes())
+
+    def test_actual_comfy_pinned_node_cpu_tensor_matches_reference_pixels(self):
+        graph, _ = self._build()
+        node = graph["17"]["inputs"]
+        tensor, = WebVNPinnedFacePNG().load(
+            node["png_base64"], node["sha256"])
+        self.assertEqual(tuple(tensor.shape), (1, 512, 512, 3))
+        self.assertEqual(str(tensor.device), "cpu")
+        self.assertAlmostEqual(float(tensor[0,0,0,0]), 240 / 255, places=6)
+        self.assertAlmostEqual(float(tensor[0,0,0,1]), 20 / 255, places=6)
+        self.assertAlmostEqual(float(tensor[0,1,1,0]), 60 / 255, places=6)
+
+    def test_embedded_face_bytes_retagged_after_build_rejected_at_consumer(self):
+        graph, _ = self._build()
+        node = graph["17"]["inputs"]
+        alternate = io.BytesIO()
+        Image.new("RGB", (512,512), (6, 32, 240)).save(alternate, "PNG")
+        node["png_base64"] = base64.b64encode(alternate.getvalue()).decode()
+        with self.assertRaisesRegex(ValueError, "pinned_face_sha_mismatch"):
+            decode_pinned_face_png(node["png_base64"], node["sha256"])
+
+    def test_embedded_face_invalid_base64_oversize_or_canvas_blocked(self):
+        graph, _ = self._build()
+        node = graph["17"]["inputs"]
+        with self.assertRaisesRegex(ValueError, "pinned_face_invalid_base64"):
+            decode_pinned_face_png("!", node["sha256"])
+        with self.assertRaisesRegex(ValueError, "pinned_face_invalid_transport_size"):
+            decode_pinned_face_png("A" * 16_000_004, node["sha256"])
+        wrong = io.BytesIO()
+        Image.new("RGB", (256, 256)).save(wrong, "PNG")
+        with self.assertRaisesRegex(ValueError, "pinned_face_invalid_png_pixels"):
+            encode_pinned_face_png(wrong.getvalue(),
+                                   hashlib.sha256(wrong.getvalue()).hexdigest())
+
+    def test_required_comfy_pinned_node_missing_is_not_executable(self):
+        assert not m._pinned_face_node_installed({})
+        assert not m._pinned_face_node_installed({
+            "WebVNPinnedFacePNG": {"input": {"required": {"sha256": ["STRING"]}}}})
+        self.assertTrue(m._pinned_face_node_installed({
+            "WebVNPinnedFacePNG": {"input": {"required": {
+                "png_base64": ["STRING"], "sha256": ["STRING"]}},
+                "output": ["IMAGE"]}}))
 
     def test_rejects_crc_valid_undecodable_face_before_gpu(self):
         data = crc_valid_but_undecodable_png((self.input / "face0.png").read_bytes())

@@ -282,9 +282,31 @@ def build(root, p, prefix, *, comfy_input=None):
     if p.get("case") != CASE or p.get("factor") != FACTOR or p.get("new_value") != VALUE:
         raise ValueError("unexpected_typed_sdxl_factor")
     src, graph = read_source(root, p["base_case_sha256"], comfy_input=comfy_input)
-    # Only output filename differs for attribution, not an image-generation factor.
+    # The baseline still validates the installed SDXL IPAdapter face topology
+    # with its original LoadImage. Replace ONLY the face transport node AFTER
+    # that guard: Comfy will decode immutable PNG bytes carried in the graph,
+    # never dereference a mutable filename after source validation.
+    from comfy_custom_nodes.web_vn_pinned_face import encode_pinned_face_png
+    actor = src["job"]["spec"]["character"]
+    upload = src["face_uploads"][actor]
+    face_path = (Path(comfy_input).expanduser().resolve()
+                 if comfy_input is not None
+                 else Path.home() / ".local/share/mcp-vn-comfy/input") / upload["image"]
+    face_sha = upload["upload_sha256"]
+    frozen_upload = _read_pinned(face_path, face_sha, max_bytes=MAX_PRIVATE_IMAGE)
+    graph["17"] = {
+        "class_type": "WebVNPinnedFacePNG",
+        "inputs": {"png_base64": encode_pinned_face_png(frozen_upload, face_sha),
+                   "sha256": face_sha},
+    }
+    # This is a compatibility-bound input transport change, not a new sampler
+    # or model factor. The node must be separately installed/reviewed by Lab;
+    # an absent Comfy custom node is NOT an installed capability.
     graph["7"]["inputs"]["filename_prefix"] = prefix
     return graph, {
+        "face_input_transport": "sha_bound_embedded_png_cpu_source_only",
+        "face_consumer_node": "WebVNPinnedFacePNG",
+        "face_graph_payload_sha256": face_sha,
         "source_snapshot_sha256": p["base_case_sha256"],
         "source_job_sha256": src["source_job_sha256"],
         "scene_contract_sha256": src["scene_contract_sha256"],

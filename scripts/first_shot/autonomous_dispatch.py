@@ -167,6 +167,21 @@ def build_graph_for_plan(p, case, prefix, *, root=None):
     }
 
 
+def _pinned_face_node_installed(object_info):
+    """Strict installed capability check. Source code alone is not deployment."""
+    if not isinstance(object_info, dict):
+        return False
+    node = object_info.get("WebVNPinnedFacePNG")
+    if not isinstance(node, dict):
+        return False
+    ins = (node.get("input") or {}).get("required") or {}
+    output = node.get("output")
+    return (isinstance(ins, dict) and
+            all(k in ins and isinstance(ins[k], list) and
+                ins[k][0] == "STRING" for k in ("png_base64", "sha256")) and
+            output == ["IMAGE"])
+
+
 def tick(root):
     root = setup(root)
     with (root.parent.parent / "gpu-exclusive-lab.lock").open("a+") as lock:
@@ -203,6 +218,18 @@ def tick(root):
             # result lets lab_exclusive restore stopped dev services safely.
             path.replace(root / "blocked" / path.name)
             return {"status": "BLOCKED_INVALID_PLAN", "detail": type(exc).__name__}
+        if is_sprite:
+            # Runtime must have this exact CPU input consumer BEFORE /prompt.
+            # An uninstalled source-only custom node is not an available factor.
+            try:
+                info = r.api("/object_info", timeout=8)
+            except Exception:
+                return {"status": "BLOCKED_PINNED_NODE_METADATA_UNKNOWN",
+                        "id": p["id"]}
+            if not _pinned_face_node_installed(info):
+                path.replace(root / "blocked" / path.name)
+                return {"status": "BLOCKED_UNINSTALLED_PINNED_FACE_NODE",
+                        "id": p["id"]}
         graph_sha = sha(json.dumps(graph, sort_keys=True).encode())
         record = dict(p)
         record.update(status="PREPARED_NOT_SUBMITTED",
