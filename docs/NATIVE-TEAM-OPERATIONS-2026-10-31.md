@@ -1,5 +1,8 @@
 # Native ChatGPT engineering team — operational design and rollout (2026-10-31)
 
+> **HISTORICAL RECORD — not an operating procedure after the owner's 2026-11-01 reset.** Old role counts, approval chains, model restrictions, task priorities and restart requirements below are archived evidence only. Use current [AGENTS](../AGENTS.md), [worker contract](WORKER-OPERATING-CONTRACT-2026-10-31.md) and [LAB scope](LAB-EXCLUSIVE-FAST-PATH-2026-10-31.md). Do not resume old tasks from this document.
+
+
 > **DRAFT / source-only commissioning.** Read [../../AGENTS.md](../../AGENTS.md), [../DEVELOPMENT-AND-TESTING.md](../DEVELOPMENT-AND-TESTING.md), [../RENDER-HANDOFF-2026-10-31.md](../RENDER-HANDOFF-2026-10-31.md) before touching any source, model, image or game. No merge to main, GPU or production deployment is implied.
 
 ## Desired outcome, not a proxy metric
