@@ -49,7 +49,13 @@ valid only when the real call uses None; do not guess. Optional `source_job` and
 `archived_job`, `diagnostic_job`; these record the owner's account. The runner
 never claims historical fidelity, and rechecks input bytes after assessment.
 
-## One isolated attempt after root confirms the permitted CPU route
+## One isolated attempt under existing authority and normal tool review
+
+Standing owner authority covers this bounded private CPU smoke; no new chat or
+root permission is required for each attempt. Actual platform review still
+applies. A materially safer constrained action may be submitted through normal
+tool review with its concrete risk reduction explained; do not replay or merely
+reword a denied operation, or bypass its review through another role or route.
 
 Resolve `QA_REPO`, `QA_PYTHON` (existing environment), `QA_CASE`, `QA_TOOL`,
 `QA_ROOT` (fresh private directory), and `QA_THREADS` to actual values. Preserve
