@@ -224,12 +224,35 @@ async function refreshHealth() {
   }
 }
 function openViewer(j) {
+  $("viewer-download").hidden = false;
   $("viewer").hidden = false;
   $("viewer-image").src = "/api/image/" + j.id;
   $("viewer-name").textContent = j.model_name || getModel(j.model).name;
   $("viewer-meta").textContent = j.width + "×" + j.height +
     " · Seed " + j.seed + " · " + (j.duration || "—") + " с";
   $("viewer-download").href = "/api/download/" + j.id;
+}
+async function loadMiraPack() {
+  const panel = $("mira-pack");
+  try {
+    const data = await api("/api/mira-pack");
+    const ids = (data.assets || []).map(a => a.id);
+    const choices = $("mira-pack-choices");
+    choices.replaceChildren();
+    for (const id of ids) {
+      const button = text("button", id, "subtle");
+      button.type = "button";
+      button.addEventListener("click", () => {
+        $("viewer").hidden = false;
+        $("viewer-image").src = "/api/mira-pack/" + encodeURIComponent(id);
+        $("viewer-name").textContent = id;
+        $("viewer-meta").textContent = "PROVISIONAL / NOT REVIEWED";
+        $("viewer-download").hidden = true;
+      });
+      choices.append(button);
+    }
+    panel.hidden = ids.length === 0;
+  } catch (_) { panel.hidden = true; }
 }
 function closeViewer() {
   $("viewer").hidden = true;
@@ -362,7 +385,7 @@ async function enter() {
   const results = await api("/api/models");
   models = results.models || [];
   renderModels();
-  await Promise.all([refreshJobs(true),refreshHealth(),loadLLMOptions()]);
+  await Promise.all([refreshJobs(true),refreshHealth(),loadLLMOptions(),loadMiraPack()]);
   setInterval(() => {
     if (!$("shell").hidden) refreshJobs();
   },2300);
@@ -400,6 +423,7 @@ document.addEventListener("DOMContentLoaded",async () => {
   });
   $("logout").addEventListener("click",async () => {
     try { await api("/api/logout",{}); } catch (_) { }
+    closeViewer();
     showLogin();
   });
   $("model").addEventListener("change",updateModelInfo);
