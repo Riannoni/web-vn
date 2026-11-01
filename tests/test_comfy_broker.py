@@ -444,6 +444,19 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             self.broker.external_auth_digest = previous
 
+    async def test_symlink_state_dir_must_not_change_target_or_create_db(self):
+        # Disposable state only: an alias to a real directory must fail
+        # before broker chmod/lock/SQLite can touch the referenced target.
+        real = Path(self.tmp.name) / "aliased-state-target"
+        real.mkdir()
+        real.chmod(0o750)
+        alias = Path(self.tmp.name) / "broker-state-alias"
+        alias.symlink_to(real, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "broker_state_dir_symlink"):
+            m.Broker(alias, "http://127.0.0.1:9")
+        self.assertEqual(real.stat().st_mode & 0o777, 0o750)
+        self.assertFalse((real / "broker.sqlite3").exists())
+
     async def test_external_digest_file_rejects_world_access_or_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "lease.sha256"
