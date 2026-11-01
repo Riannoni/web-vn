@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import json
 import hashlib
+import math
 import os
 import re
 import sys
@@ -962,6 +963,7 @@ def assess(job,raw,background):
     metrics["result_bytes"]=len(output)
     semantic="unavailable"
     warnings=[]
+    identity_reference_loaded=False
     qa_t0=time.monotonic()
     # This span includes image decode, matte/cutout and final PNG encode,
     # which happen before the existing QA stopwatch starts.
@@ -1019,8 +1021,11 @@ def assess(job,raw,background):
             if kind=="sprite" and (job.get("spec") or {}).get("face_asset"):
                 try:
                     ref=fetch_asset(job["spec"]["face_asset"])
+                    if ref is None:
+                        raise ValueError("canonical face reference unavailable")
                     payload["identity_b64"]=base64.b64encode(pil_png(ref)).decode("ascii")
                     payload["candidate_face_b64"]=base64.b64encode(pil_png(head_crop(image))).decode("ascii")
+                    identity_reference_loaded=True
                 except Exception as identity_err:
                     metrics["identity_check_error"]=str(identity_err)[:100]
                     raise ValueError("Mandatory sprite face reference unavailable") from identity_err
@@ -1082,7 +1087,12 @@ def assess(job,raw,background):
             if validation.get("environment"):
                 metrics["environment_predicted"]=validation["environment"]
             if validation.get("identity_similarity") is not None:
-                metrics["identity_similarity"]=float(validation["identity_similarity"])
+                similarity=validation["identity_similarity"]
+                if (isinstance(similarity,(float,int)) and not isinstance(similarity,bool)
+                    and -1.0<=similarity<=1.0 and math.isfinite(similarity)):
+                    metrics["identity_similarity"]=float(similarity)
+                else:
+                    metrics["identity_similarity_invalid"]=True
             if validation.get("identity_face_visibility"):
                 metrics["identity_face_visibility"]=str(validation["identity_face_visibility"])
             # Independent visual-grounding measurements are retained in the
@@ -1134,6 +1144,8 @@ def assess(job,raw,background):
          spec.get("composition")!="anchored_composite"))
     if semantic_required and semantic=="unavailable":
         reasons.append("Semantic QA unavailable: keeping last accepted asset")
+    if semantic_required and semantic=="failed" and not reasons:
+        reasons.append("Semantic QA failed without actionable details")
     if (kind in ("scene","local_cg") and
         spec.get("composition")=="neural_story" and environment!="unclassified"
         and semantic=="passed" and
@@ -1153,11 +1165,22 @@ def assess(job,raw,background):
     if kind=="sprite":
         sim=metrics.get("identity_similarity")
         visibility=metrics.get("identity_face_visibility")
-        evidence["identity"]={"verdict":"unobservable" if visibility=="unobservable" else
-            "violated" if sim is not None and sim<.80 else
-            "verified" if sim is not None and sim>=.86 else "unobservable",
-            "confidence":sim if visibility!="unobservable" else None,
-            "reason":"face_occluded" if visibility=="unobservable" else "face_similarity"}
+        metrics["identity_reference_loaded"]=identity_reference_loaded
+        if visibility=="unobservable":
+            identity_verdict="unobservable"
+        elif visibility=="violated" or (sim is not None and sim<.80):
+            identity_verdict="violated"
+        elif (identity_reference_loaded and visibility=="verified" and
+              sim is not None and sim>=.86):
+            identity_verdict="verified"
+        else:
+            identity_verdict="unobservable"
+        evidence["identity"]={"verdict":identity_verdict,
+            "confidence":sim if identity_reference_loaded and visibility!="unobservable" else None,
+            "reason":"canonical_face_reference_unavailable" if not identity_reference_loaded else
+                     "face_occluded" if visibility=="unobservable" else "face_similarity"}
+        if identity_verdict!="verified":
+            reasons.append("Mandatory sprite identity not independently verified")
     if kind=="scene" and wall_brace_required(action_spec):
         features=metrics.get("scene_action_evidence")
         features=features if isinstance(features,dict) else {}
