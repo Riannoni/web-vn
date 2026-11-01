@@ -6,6 +6,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 import uuid
 
 from aiohttp import WSMsgType, web
@@ -443,6 +444,46 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.broker.external()["lease_id"])
         finally:
             self.broker.external_auth_digest = previous
+
+    async def test_state_dir_swap_after_validation_cannot_redirect_durable_files(self):
+        # Deterministic interleaving at the first fchmod(root_fd): the name
+        # changes after O_NOFOLLOW validation, before lock/SQLite creation.
+        # No GPU, network backend or real application state is involved.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            state = base / "state"
+            displaced = base / "original-state"
+            attacker = base / "redirect-target"
+            state.mkdir()
+            attacker.mkdir()
+            actual_fchmod = m.os.fchmod
+            switched = False
+
+            def interleave(fd, mode):
+                nonlocal switched
+                result = actual_fchmod(fd, mode)
+                if not switched:
+                    state.rename(displaced)
+                    state.symlink_to(attacker, target_is_directory=True)
+                    switched = True
+                return result
+
+            candidate = None
+            try:
+                with mock.patch.object(m.os, "fchmod", side_effect=interleave):
+                    candidate = m.Broker(state, "http://127.0.0.1:9")
+                self.assertTrue(switched)
+                self.assertTrue((displaced / "broker.lock").is_file())
+                self.assertTrue((displaced / "broker.sqlite3").is_file())
+                self.assertFalse((attacker / "broker.lock").exists())
+                self.assertFalse((attacker / "broker.sqlite3").exists())
+            finally:
+                if candidate is not None:
+                    await candidate.stop()
+
+            # Pinned original state remains recoverable under its new name.
+            recovered = m.Broker(displaced, "http://127.0.0.1:9")
+            await recovered.stop()
 
     async def test_symlink_state_dir_must_not_change_target_or_create_db(self):
         # Disposable state only: an alias to a real directory must fail
