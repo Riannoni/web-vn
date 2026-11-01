@@ -26,7 +26,7 @@ import zimage_backend as z
 import run_one as r
 
 ID = re.compile(r"^[A-Z][A-Z0-9_-]{5,55}$")
-ALLOWED = {"prompt_text", "native_pose"}
+ALLOWED = {"prompt_text", "native_pose", "sdxl_sprite_body_source"}
 STATES = ("pending", "running", "review_pending", "blocked", "reviewed")
 MAX_WALL_SECONDS = 90
 
@@ -48,7 +48,7 @@ def base_sha(case_id):
     return sha(json.dumps(c, sort_keys=True, separators=(",", ":")).encode())
 
 
-def validate(p):
+def validate(p, *, root=None):
     if not isinstance(p, dict) or set(p) != {
         "schema", "id", "case", "base_case_sha256", "factor",
         "new_value", "hypothesis", "falsifier", "author_task"
@@ -58,7 +58,15 @@ def validate(p):
         raise ValueError("invalid_id")
     if p["factor"] not in ALLOWED:
         raise ValueError("unverified_multi_factor_or_control_graph")
-    if p["base_case_sha256"] != base_sha(p["case"]):
+    is_sdxl_sprite = p["factor"] == "sdxl_sprite_body_source"
+    if is_sdxl_sprite:
+        import sdxl_sprite_factor as sprite
+        if p["case"] != sprite.CASE or p["new_value"] != sprite.VALUE:
+            raise ValueError("unapproved_sdxl_sprite_factor")
+        if root is None:
+            raise ValueError("private_sdxl_source_root_required")
+        sprite.read_source(root, p["base_case_sha256"])
+    elif p["base_case_sha256"] != base_sha(p["case"]):
         raise ValueError("baseline_case_changed")
     if not isinstance(p["author_task"], str) or not re.fullmatch(r"R-[0-9]{1,4}", p["author_task"]):
         raise ValueError("not_renderer_authored")
@@ -67,7 +75,9 @@ def validate(p):
     if not isinstance(p["falsifier"], str) or not 30 <= len(p["falsifier"]) <= 700:
         raise ValueError("no_explicit_falsifier")
     value = p["new_value"]
-    if p["factor"] == "native_pose":
+    if p["factor"] == "sdxl_sprite_body_source":
+        pass  # Private baseline and typed factor verified above.
+    elif p["factor"] == "native_pose":
         from pose_graph_native import POSE_GUIDE_SHA256
         if p["case"] != "CG-03" or value != POSE_GUIDE_SHA256:
             raise ValueError("unapproved_native_pose_factor_or_hash")
@@ -90,7 +100,7 @@ def setup(root):
 
 def queue(root, p):
     root = setup(root)
-    p = validate(p)
+    p = validate(p, root=root)
     # G2 review must finish before next hypothesis to avoid blind rerender.
     if list((root / "running").glob("*.json")) or list((root / "review_pending").glob("*.json")):
         return {"enqueued": False, "reason": "one_candidate_requires_review"}
@@ -102,13 +112,18 @@ def queue(root, p):
     return {"enqueued": True, "id": p["id"]}
 
 
-def build_graph_for_plan(p, case, prefix):
+def build_graph_for_plan(p, case, prefix, *, root=None):
     """Build frozen baseline; for CG-03 add only SHA-pinned native pose patch.
 
     Caller must hold the lab GPU lock, and lab_exclusive must have stopped all
     known competing dev /prompt writers before the first GPU submission.
     This helper itself cannot submit, publish or claim G2.
     """
+    if p["factor"] == "sdxl_sprite_body_source":
+        import sdxl_sprite_factor as sprite
+        if root is None:
+            raise ValueError("private_sdxl_source_root_required")
+        return sprite.build(root, p, prefix)
     is_pose = p["factor"] == "native_pose"
     graph = z.create_graph(
         case["prompt"] if is_pose else p["new_value"],
@@ -172,16 +187,17 @@ def tick(root):
             return {"status": "NO_APPROVED_WORK"}
         path = todo[0]
         try:
-            p = validate(json.loads(path.read_text()))
+            p = validate(json.loads(path.read_text()), root=root)
         except Exception as exc:
             path.replace(root / "blocked" / path.name)
             return {"status": "BLOCKED_INVALID_PLAN", "detail": type(exc).__name__}
         if not r.queue_empty():
             return {"status": "GPU_QUEUE_BUSY_DEFER", "id": p["id"]}
-        case = r.load_case(p["case"])
-        prefix = "vn_zimage_probe_ab_" + p["id"].lower() + "_"
+        is_sprite = p["factor"] == "sdxl_sprite_body_source"
+        case = None if is_sprite else r.load_case(p["case"])
+        prefix = ("vn_sdxl_sprite_ab_" if is_sprite else "vn_zimage_probe_ab_") + p["id"].lower() + "_"
         try:
-            graph, pose_evidence = build_graph_for_plan(p, case, prefix)
+            graph, pose_evidence = build_graph_for_plan(p, case, prefix, root=root)
         except Exception as exc:
             # PRE-SUBMIT refusal: no Comfy prompt was sent. The known-blocked
             # result lets lab_exclusive restore stopped dev services safely.
@@ -191,12 +207,13 @@ def tick(root):
         record = dict(p)
         record.update(status="PREPARED_NOT_SUBMITTED",
                       started_utc=datetime.now(timezone.utc).isoformat(),
-                      source_pack_case_sha256=base_sha(p["case"]),
+                      source_pack_case_sha256=None if is_sprite else base_sha(p["case"]),
                       graph_sha256=graph_sha,
-                      first_attempt=3 if p["factor"] == "native_pose" else 2,
-                      experiment_class="disposable_AB_not_pack_first_shot",
-                      frozen_seed=case["seed"],
-                      frozen_prompt_sha256=sha(case["prompt"].encode()),
+                      first_attempt=None if is_sprite else (3 if p["factor"] == "native_pose" else 2),
+                      experiment_class=("disposable_canonical_sprite_body_source_not_pack_first_shot"
+                                        if is_sprite else "disposable_AB_not_pack_first_shot"),
+                      frozen_seed=None if is_sprite else case["seed"],
+                      frozen_prompt_sha256=None if is_sprite else sha(case["prompt"].encode()),
                       g1="NOT_MEASURED", g2="NOT_REVIEWED",
                       changed_factors=[p["factor"]], published=False)
         record.update(pose_evidence)
@@ -246,13 +263,58 @@ def tick(root):
             raw = png.read_bytes()
             if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
                 raise RuntimeError("invalid_png")
-            from PIL import Image
-            with Image.open(png) as im:
-                im.verify()
+            # Fully decode the exact original Comfy bytes. PNG signature and
+            # chunk verification alone can admit CRC-valid, undecodable IDAT.
+            import io
+            from PIL import Image, ImageFile
+            if ImageFile.LOAD_TRUNCATED_IMAGES:
+                raise RuntimeError("unsafe_truncated_png_decoder_policy")
+            with Image.open(io.BytesIO(raw)) as im:
+                if im.format != "PNG":
+                    raise RuntimeError("not_exact_original_png")
                 size = list(im.size)
-            record.update(status="GPU_FINISHED_REVIEW_REQUIRED", g1="PASS",
-                          png_sha256=sha(raw), original_png_path=str(png),
-                          canvas=size, gpu_submit_to_png_seconds=round(time.monotonic()-t, 3),
+                im.verify()
+            with Image.open(io.BytesIO(raw)) as im:
+                im.load()
+            # GPU submit->PNG ends BEFORE CPU RGBA matte. This is NOT
+            # asset-enqueue->publish-eligible, and remains unmeasured here.
+            original_sha = sha(raw)
+            record.update(g1="PASS", png_sha256=original_sha,
+                          original_png_path=str(png), canvas=size,
+                          gpu_submit_to_png_seconds=round(time.monotonic()-t, 3),
+                          publish_eligible=False,
+                          asset_enqueue_to_publish_eligible_seconds=None)
+            if is_sprite:
+                import sdxl_sprite_factor as sprite
+                try:
+                    matte_evidence = sprite.derive_rgba_candidate(
+                        root, p["id"], png, original_sha)
+                except Exception as exc:
+                    # Comfy history is known and the original PNG was decoded:
+                    # terminal *postprocessing* failure, not an unknown GPU
+                    # submission. Preserve original for independent review,
+                    # never retry or publish. Review-pending stays fenced.
+                    record.update(
+                        # lab_exclusive.py has a strict terminal status
+                        # allowlist. An attributed completed GPU original
+                        # remains review-required even if optional matte
+                        # extraction was unsafe; do NOT return a novel status
+                        # that would strand the stopped dev submitters.
+                        status="GPU_FINISHED_REVIEW_REQUIRED",
+                        postprocess_status="BLOCKED_UNSAFE",
+                        alpha_status="POSTPROCESS_BLOCKED",
+                        postprocess_error_type=type(exc).__name__,
+                        g2="NOT_REVIEWED", published=False,
+                        completed_utc=datetime.now(timezone.utc).isoformat())
+                    atomic(work / "result.json", record)
+                    (root / "running" / path.name).replace(
+                        root / "review_pending" / path.name)
+                    return {"status": record["status"], "id": p["id"],
+                            "postprocess_status": record["postprocess_status"],
+                            "prompt_id": pid, "png_sha256": original_sha,
+                            "submit_to_png_seconds": record["gpu_submit_to_png_seconds"]}
+                record.update(matte_evidence)
+            record.update(status="GPU_FINISHED_REVIEW_REQUIRED",
                           completed_utc=datetime.now(timezone.utc).isoformat())
             atomic(work / "result.json", record)
             (root / "running" / path.name).replace(root / "review_pending" / path.name)
