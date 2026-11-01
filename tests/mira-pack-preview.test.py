@@ -52,6 +52,8 @@ class PackPreviewTests(unittest.TestCase):
         self.reader = PackPreview(self.base)
 
     def write_manifest(self):
+        if self.manifest.exists():
+            self.manifest.chmod(0o600)
         self.manifest.write_text(json.dumps(self.source))
         self.manifest.chmod(0o400)
 
@@ -66,7 +68,9 @@ class PackPreviewTests(unittest.TestCase):
             self.assertEqual(caught.exception.status, 404)
 
     def test_stale_index_fails_closed(self):
+        self.index.chmod(0o600)
         self.index.write_text('{"changed":true}')
+        self.index.chmod(0o400)
         with self.assertRaises(PreviewError) as caught:
             self.reader.image_bytes('VN_1')
         self.assertEqual(caught.exception.status, 409)
@@ -182,7 +186,9 @@ class ModelLabRouteTests(PackPreviewTests):
 
     def test_unknown_path_and_stale_index(self):
         self.assertEqual(self.route(authed=True, path='/api/mira-pack/VN_2')[0], 404)
+        self.index.chmod(0o600)
         self.index.write_text('{"changed":true}')
+        self.index.chmod(0o400)
         self.assertEqual(self.route(authed=True, path='/api/mira-pack/VN_1')[0], 409)
 
     def test_existing_secure_headers_retained(self):
