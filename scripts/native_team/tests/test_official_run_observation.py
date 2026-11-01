@@ -74,6 +74,54 @@ class OfficialRunObservationTests(unittest.TestCase):
         self.assertEqual(status["pending_total"], 0)
         self.assertNotIn("content_text", status["run_observations"][0])
 
+    def test_literal_platform_denial_is_reported_even_with_false_platform_flags(self):
+        for text in (
+            "NO_NEW_EVIDENCE. Earlier PLATFORM_DENIAL for CG_3 remains; no replay.",
+            "ARTIFACT_READY. CG_3 remains PLATFORM_DENIAL; no PNG generated.",
+        ):
+            with self.subTest(text=text):
+                result = self.record(official(text))
+                summary = result["observation"]
+                self.assertEqual(summary["cloud_status"], "completed")
+                self.assertFalse(summary["is_failure_message"])
+                self.assertFalse(summary["requires_user_action"])
+                self.assertEqual(summary["blocker_kinds"], ["safety_denial"])
+                self.assertEqual(summary["operation_state"], "blocker_reported")
+                self.assertEqual(summary["next_action"], "honor_denial_no_replay")
+                self.assertEqual(summary["product_result"], "unverified")
+                self.assertIsNone(summary["diagnostic_retry_plan"])
+                self.assertFalse(result["automations_invoked"])
+                self.assertFalse(result["automatic_retry"])
+
+    def test_historical_platform_denial_does_not_stop_unrelated_ready_work(self):
+        blocked_event, ready_event = "b" * 40, "c" * 40
+        token = m.check(self.root, "e2e", "operation_blocked", blocked_event,
+                        "chief", reserve=True, now=100)["reservation_id"]
+        m.record_outcome(self.root, "e2e", "operation_blocked", blocked_event,
+                         "chief", token, "unknown", RECEIPT, now=101)
+        m.defer(self.root, "renderer", "source_pr_ready", ready_event,
+                "integration", reason="verified_source_ready", now=102)
+        before = m.status(self.root)["pending"]
+        result = self.record(official(
+            "DEPLOYED: a confirmed prompt fix. Historical CG_3 PLATFORM_DENIAL "
+            "remains scoped to that operation; other permitted work continues."))
+        self.assertEqual(result["observation"]["blocker_kinds"], ["safety_denial"])
+        self.assertEqual(result["observation"]["product_result"], "unverified")
+        self.assertIsNone(result["observation"]["diagnostic_retry_plan"])
+        self.assertFalse(result["automations_invoked"])
+        self.assertFalse(result["automatic_retry"])
+        self.assertEqual(m.status(self.root)["pending"], before)
+        ready = m.check(self.root, "renderer", "source_pr_ready", ready_event,
+                        "dispatcher", reserve=False, now=200)
+        self.assertTrue(ready["eligible"])
+        self.assertNotIn("reserved", ready)
+        blocked = m.check(self.root, "e2e", "operation_blocked", blocked_event,
+                          "dispatcher", reserve=False, now=10000)
+        self.assertFalse(blocked["eligible"])
+        self.assertEqual(blocked["delivery_status"], "unknown")
+        with sqlite3.connect(self.root / "state/scheduled-wake-history.sqlite3") as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM wake_attempt").fetchone()[0], 1)
+
     def test_operator_can_record_actual_run_but_cannot_acknowledge_recipient(self):
         event = "b" * 40
         m.check(self.root, "e2e", "operation_blocked", event,

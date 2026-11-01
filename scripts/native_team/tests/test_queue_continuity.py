@@ -56,6 +56,22 @@ class QueueTests(unittest.TestCase):
                     instructions="Isolated source-only causal negative regression and no GPU production or private data operations.",
                     paths=paths or ["worker/test_"+id+".py"],
                     dependencies=[dep] if dep else [],priority=80)
+    def test_empty_catalog_preserves_existing_tasks_leases_and_history(self):
+        with m.open_db() as db:
+            for tid, state in (("Q-91", "pending"), ("G-91", "review_pending"),
+                               ("R-91", "leased"), ("S-91", "blocked")):
+                c.add(db, tid, "source_inventory", ["worker/existing.py"], goal="existing")
+                db.execute("UPDATE task SET state=?,owner=?,fence=?,attempt=1,lease_until=1,result=? WHERE id=?",
+                           (state, "existing-owner", "existing-fence", '{"submission":"unknown"}', tid))
+                c.emit(db, tid, "existing_evidence", "preserve unknown submission")
+            db.execute("INSERT INTO claim_baselines VALUES ('R-91','existing-source-sha')")
+            before = list(db.iterdump())
+        empty = self.write([])
+        for _ in range(2):
+            self.assertEqual(catalog.replenish(self.root, empty), {"state": "active", "enqueued": []})
+        with m.open_db() as db:
+            self.assertEqual(list(db.iterdump()), before)
+
     def test_atomic_idempotent_and_prequeued_dependency(self):
         f=self.write([self.item("Q-07","Q-06"),self.item("Q-08","Q-07")])
         self.assertEqual(catalog.replenish(self.root,f)["enqueued"],["Q-07","Q-08"])
