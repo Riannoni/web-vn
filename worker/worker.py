@@ -1023,6 +1023,7 @@ def assess(job,raw,background):
                     payload["candidate_face_b64"]=base64.b64encode(pil_png(head_crop(image))).decode("ascii")
                 except Exception as identity_err:
                     metrics["identity_check_error"]=str(identity_err)[:100]
+                    raise ValueError("Mandatory sprite face reference unavailable") from identity_err
             metrics["qa_vision_prepare_ms"]=round(
                 max(0,(time.monotonic()-vision_started)*1000),3)
             http_started=time.monotonic()
