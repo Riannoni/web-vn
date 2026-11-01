@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local-only warm visual QA. Keeps CLIP and SmolVLM CPU models hot across jobs."""
+"""Local warm visual QA; CPU default, optional explicit SmolVLM-only GPU experiment."""
 import base64
 import io
 import json
@@ -25,6 +25,14 @@ THREADS=max(1,min(8,int(os.environ.get("VN_VISION_THREADS","5"))))
 import torch
 from transformers import CLIPModel,CLIPProcessor,AutoProcessor,AutoModelForImageTextToText
 torch.set_num_threads(THREADS)
+def requested_vlm_device():
+ device=os.environ.get("VN_VLM_DEVICE","cpu")
+ if device not in ("cpu","cuda"):
+  raise ValueError("VN_VLM_DEVICE must be cpu or cuda")
+ if device=="cuda" and not torch.cuda.is_available():
+  raise RuntimeError("VN_VLM_DEVICE=cuda requested but CUDA/ROCm is unavailable")
+ return device
+VLM_DEVICE=requested_vlm_device()
 CLIP_ID="openai/clip-vit-base-patch32"
 VLM_ID="HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
 
@@ -80,6 +88,8 @@ print("VLM_DAEMON loading SmolVLM",flush=True)
 vlm_processor=AutoProcessor.from_pretrained(VLM_ID)
 vlm=AutoModelForImageTextToText.from_pretrained(
  VLM_ID,dtype=torch.float32,attn_implementation="eager").eval()
+if VLM_DEVICE=="cuda":
+ vlm=vlm.to("cuda")
 print("VLM_DAEMON ready port",PORT,flush=True)
 
 def summarize(image,prompt,max_new_tokens=62):
@@ -88,9 +98,13 @@ def summarize(image,prompt,max_new_tokens=62):
        {"type":"text","text":prompt}]}]
  inputs=vlm_processor.apply_chat_template(messages,add_generation_prompt=True,
    tokenize=True,return_dict=True,return_tensors="pt")
+ if VLM_DEVICE=="cuda":
+  inputs=inputs.to("cuda")
  with torch.inference_mode():
   result=vlm.generate(**inputs,max_new_tokens=max_new_tokens,do_sample=False,repetition_penalty=1.15)
  suffix=result[:,inputs["input_ids"].shape[1]:]
+ if VLM_DEVICE=="cuda":
+  suffix=suffix.cpu()
  return vlm_processor.batch_decode(suffix,skip_special_tokens=True)[0].strip()[:420]
 
 def image_embedding(image):
@@ -361,7 +375,8 @@ class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
   if self.path!="/healthz":
    self.send_error(404);return
-  self.response(200,{"ok":True,"model":VLM_ID,"clip":CLIP_ID})
+  self.response(200,{"ok":True,"model":VLM_ID,"clip":CLIP_ID,
+   "vlm_device":str(vlm.device),"vlm_dtype":str(vlm.dtype),"clip_device":str(clip.device)})
  def do_POST(self):
   if self.path!="/judge":
    self.send_error(404);return
