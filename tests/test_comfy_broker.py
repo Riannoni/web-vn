@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -524,6 +525,44 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sqlite_main_hardlink_rejected_before_external_mutation(self):
         await self._assert_sqlite_main_file_alias_rejected("hardlink")
+
+    async def _assert_unsafe_existing_lock_rejected(self, variant):
+        # Private, disposable recovery fixture; no real Comfy or GPU.
+        with tempfile.TemporaryDirectory(prefix="broker-lock-alias-") as directory:
+            base = Path(directory)
+            state = base / "state"
+            state.mkdir()
+            lock = state / "broker.lock"
+            outside = base / "external.lock"
+            if variant == "hardlink":
+                outside.write_bytes(b"outside-unchanged")
+                lock.hardlink_to(outside)
+            elif variant == "permissive":
+                lock.write_bytes(b"outside-unchanged")
+                lock.chmod(0o644)
+            elif variant == "fifo":
+                os.mkfifo(lock, 0o600)
+            else:
+                raise AssertionError("unexpected fixture")
+
+            candidate = None
+            try:
+                with self.assertRaisesRegex(ValueError, "unsafe_broker_lock_file"):
+                    candidate = m.Broker(state, "http://127.0.0.1:9")
+            finally:
+                if candidate is not None:
+                    await candidate.stop()
+            if variant == "hardlink":
+                self.assertEqual(outside.read_bytes(), b"outside-unchanged")
+
+    async def test_existing_broker_lock_hardlink_rejected(self):
+        await self._assert_unsafe_existing_lock_rejected("hardlink")
+
+    async def test_existing_broker_lock_permissive_mode_rejected(self):
+        await self._assert_unsafe_existing_lock_rejected("permissive")
+
+    async def test_existing_broker_lock_fifo_rejected(self):
+        await self._assert_unsafe_existing_lock_rejected("fifo")
 
     async def test_symlink_state_dir_must_not_change_target_or_create_db(self):
         # Disposable state only: an alias to a real directory must fail
