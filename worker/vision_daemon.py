@@ -209,7 +209,15 @@ def analyze(kind,image,spec,quality,identity_ref=None,candidate_face=None):
    (kind=="background" and unclear_environment) or
    (kind=="scene" and unclear_environment and not trusted_composite) or
    (kind=="sprite" and (first_anchor or outfit_change or pose_change) and quality!="fast"))
- if wants_vlm:
+ # A mandatory failure cannot be repaired by captioning: scene location
+ # evidence is CLIP-only and worker.assess requires positive verification.
+ vlm_skipped_reason=None
+ if neural_story and reasons:
+  vlm_skipped_reason="pre_vlm_mandatory_reject"
+ elif neural_story and expected!="unclassified" and scene_location_verified is not True:
+  reasons.append("Required CG location not independently verified")
+  vlm_skipped_reason="mandatory_location_unverified"
+ if wants_vlm and vlm_skipped_reason is None:
   prompts={
    "background":"Describe the architecture and objects visible. Is this indoors or outdoors? Is any person visible? One factual sentence.",
    "sprite":"Count people visible; briefly describe their face, hair, clothing and visible background in a sentence.",
@@ -339,7 +347,8 @@ def analyze(kind,image,spec,quality,identity_ref=None,candidate_face=None):
    "scene_action_observation":scene_action_observation[:420],
    "scene_action_evidence":scene_action_evidence,
    "duration_seconds":round(time.monotonic()-t0,2),
-   "vlm_caption_ms":round(max(0,vlm_caption_ms),3)}
+   "vlm_caption_ms":round(max(0,vlm_caption_ms),3),
+   "vlm_skipped_reason":vlm_skipped_reason}
 
 def timed_analyze(kind,image,spec,quality,reference,candidate):
  """Paired monotonic spans; CPU model analysis never hides lock contention."""

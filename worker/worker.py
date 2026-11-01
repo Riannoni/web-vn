@@ -1080,6 +1080,9 @@ def assess(job,raw,background):
             if semantic not in ("passed","failed","unavailable"):semantic="unavailable"
             metrics["vlm_caption"]=str(validation.get("caption",""))[:145]
             metrics["vlm_seconds"]=float(validation.get("duration_seconds",0))
+            if validation.get("vlm_skipped_reason") in (
+                    "pre_vlm_mandatory_reject","mandatory_location_unverified"):
+                metrics["vlm_skipped_reason"]=validation["vlm_skipped_reason"]
             if validation.get("environment"):
                 metrics["environment_predicted"]=validation["environment"]
             if validation.get("identity_similarity") is not None:
@@ -1369,3 +1372,4 @@ def main():
 
 if __name__=="__main__":
     main()
+
