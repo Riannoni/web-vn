@@ -27,7 +27,8 @@ export function buildSceneContract({kind,environment,location,characters=[],stat
   const region=validRegion(source?.actor_region)?source.actor_region:
                validRegion(ref.actor_region)?ref.actor_region:null;
   principals.push({id:name,name,region,
-   pose:clean(source?.pose,280),outfit:clean(source?.outfit,160),
+   // The local director accepts 350 characters; retain its current wardrobe.
+   pose:clean(source?.pose,280),outfit:clean(source?.outfit,local?350:160),
    emotion:clean(source?.emotion||source?.expression,80),
    anchor_face_asset:clean(ref.anchor_face_asset,64),
    anchor_asset:clean(ref.anchor_asset,64)});

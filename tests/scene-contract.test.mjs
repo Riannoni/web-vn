@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {buildSceneContract} from "../src/scene-contract.mjs";
+import {artSnapshot} from "../src/art-spec.mjs";
+import {parseDirectorPlan} from "../src/local-director.mjs";
 const actor=(name,region=null)=>({name,actor_region:region,outfit:"green cloak",pose:"standing"});
 test("public market includes optional extras without inventing third protagonist",()=>{
  const c=buildSceneContract({kind:"scene",environment:{id:"outdoor_market_square"},
@@ -37,4 +39,21 @@ test("actor state changes are part of authoritative CG intent fingerprint",async
  const withRegion=sceneIntentFingerprint(scene);
  scene.crowd_policy="none";
  assert.notEqual(sceneIntentFingerprint(scene),withRegion);
+});
+test("local CG contract preserves the entire accepted director wardrobe",()=>{
+ const outfit="A closed navy wool vest over a high-collared cream cotton shirt, plain fitted sleeves, dark leather ankle boots, a narrow brown belt with a simple brass buckle, matching cuffs and stitched side seams, practical travel clothes with no decoration, no armor, and no loose outer layers; keep both legs covered in black trousers and wear no cape.";
+ // A valid director field with required clothing beyond the old contract cutoff.
+ assert.ok(outfit.length<=350&&outfit.indexOf("no cape")>320);
+ const game={art_style:"semireal",hero:{name:"Ada",description:"Adult traveler"},
+  local_scene:{mode:"local",session_id:"wardrobe-regression"},
+  scene:{location:"Market square",sprites:[actor("Ada")]}};
+ const {plan,warning}=parseDirectorPlan(JSON.stringify({
+   characters:[{name:"Ada",outfit}],render:true}),{game});
+ assert.equal(warning,"");
+ assert.equal(plan.characters[0].outfit,outfit);
+ const spec=artSnapshot(game,{kind:"local_cg",style:"semireal",
+   preview_only:true,local_visual_state:plan});
+ assert.equal(spec.local_visual_state.characters[0].outfit,outfit);
+ assert.equal(spec.visual_contract.principals[0].outfit,outfit);
+ assert.equal(spec.characters[0].outfit,"green cloak");
 });
